@@ -38,9 +38,15 @@ const WEB_URL = process.env.WEB_URL || '';
 // ============================================
 const DATA_FILE = path.join(__dirname, 'botdata.json');
 
+// ============================================
+// ADMIN MOVIE ADDING STATE
+// ============================================
+const addMovieState = {}; // { adminId: { step: 1|2|3, poster_file_id: '', title: '', overview: '' } }
+
 let botData = {
   users: {},           // { userId: { first_name, username, joinedAt, lastActive, subscribed } }
   notifications: [],   // [ { text, date, sentBy } ]
+  adminMovies: [],     // [ { title, poster_file_id, overview, video_file_id, addedBy, addedAt } ]
   stats: {
     totalMessages: 0,
     commandsUsed: 0,
@@ -191,14 +197,94 @@ function formatList(items, emoji = '🎥') {
 }
 
 // ============================================
-// MIDDLEWARE: Register user on every message
+// MIDDLEWARE: Register user + Handle 3-step Add Movie
 // ============================================
-bot.use((ctx, next) => {
+bot.use(async (ctx, next) => {
   if (ctx.from) {
     registerUser(ctx);
     botData.stats.totalMessages++;
     saveData();
   }
+
+  // ============================================
+  // 3-STEP ADD MOVIE HANDLER
+  // ============================================
+  const adminId = ctx.from ? ctx.from.id : 0;
+  const state = addMovieState[adminId];
+
+  if (state && isAdmin(ctx)) {
+
+    // STEP 1: Poster (Photo) လက်ခံခြင်း
+    if (state.step === 1 && ctx.message && ctx.message.photo) {
+      const photo = ctx.message.photo;
+      // အကြီးဆုံး size ကိုယူမယ်
+      const fileId = photo[photo.length - 1].file_id;
+      state.poster_file_id = fileId;
+      state.step = 2;
+
+      await ctx.reply(
+        '✅ Poster လက်ခံရရှိပါပြီး!\n\n📝 *အဆင့် ၂/၃: Movie Overview ရေးပါ*\n\nဇတ်ကားအမည်နဲ့ အညွှန်းကို အောက်ပါပုံစံဖြင့်ရေးပါ:\n\n*ဇတ်ကားအမည် (နှစ်)*\nအညွှန်း/ဖော်ပြချက် အသေးစိတ်\n\nဥပမာ:\n*Appleseed Ex Machina (2007)*\nဒီဇတ်ကားက Sci-Fi Animation တစ်ကားဖြစ်ပြီး...',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
+          ])
+        }
+      );
+      return; // Stop processing other handlers
+    }
+
+    // STEP 2: Overview (Text) လက်ခံခြင်း
+    if (state.step === 2 && ctx.message && ctx.message.text && !ctx.message.text.startsWith('/')) {
+      state.overview = ctx.message.text;
+      state.step = 3;
+
+      await ctx.reply(
+        '✅ Overview လက်ခံရရှိပါပြီး!\n\n🎬 *အဆင့် ၃/၃: Video File ပို့ပါ*\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။\nVideo ပို့ပြီးရင် ဇတ်ကားအသစ် သိမ်းဆည်းသွားပါမယ်။',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('⏭️ Video မပါ', 'skip_video')],
+            [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
+          ])
+        }
+      );
+      return;
+    }
+
+    // STEP 3: Video File လက်ခံခြင်း
+    if (state.step === 3 && ctx.message && (ctx.message.video || ctx.message.document)) {
+      const videoFileId = ctx.message.video ? ctx.message.video.file_id : ctx.message.document.file_id;
+
+      // ဇတ်ကားအမည်ကို Overview ပထမစာကြောင်းကနေယူမယ်
+      const overviewLines = state.overview.split('\n');
+      const titleLine = overviewLines[0].replace(/\*/g, '').trim();
+      const overviewText = overviewLines.slice(1).join('\n').trim() || state.overview;
+
+      const newMovie = {
+        title: titleLine || 'Unknown Movie',
+        poster_file_id: state.poster_file_id,
+        overview: state.overview,
+        overview_text: overviewText,
+        video_file_id: videoFileId,
+        addedBy: ctx.from.first_name,
+        addedAt: new Date().toISOString()
+      };
+
+      if (!botData.adminMovies) botData.adminMovies = [];
+      botData.adminMovies.push(newMovie);
+      saveData();
+
+      delete addMovieState[adminId];
+
+      await ctx.reply(
+        `✅ *ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ!*\n\n🎬 ${newMovie.title}\n🖼️ Poster ✅\n📝 Overview ✅\n🎬 Video ✅\n\n🔍 User တွေက /search ${newMovie.title} နဲ့ ရှာလို့ရပါပြီ`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+  }
+
   return next();
 });
 
@@ -585,19 +671,77 @@ bot.action('admin_notify', (ctx) => {
   );
 });
 
-// 🎬 Add Movie
+// 🎬 Add Movie - 3 Step Flow
 bot.action('admin_addmovie', (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
   ctx.answerCbQuery();
 
+  // Step 1 ကို စမယ်
+  addMovieState[ctx.from.id] = { step: 1, poster_file_id: '', title: '', overview: '' };
+
   ctx.editMessageText(
-    '🎬 *ရုပ်ရှင်အသစ်ထည့်ရန်*\n\nအောက်ပါပုံစံဖြင့်ပို့ပါ:\n\n`/addmovie အမျိုးအစား | အမည် | နှစ် | Rating | ဖော်ပြချက်`\n\nဥပမာ:\n`/addmovie action | Deadpool 3 | 2024 | 8.0 | Wolverine နဲ့ Deadpool ပေါင်းတဲ့ Movie`\n\nအမျိုးအစားများ: action, comedy, horror, romance, scifi',
+    '🎬 *ရုပ်ရှင်အသစ်ထည့်ရန် - အဆင့် ၁/၃*\n\n🖼️ *Movie Poster ပို့ပါ*\n\nရုပ်ရှင် Poster ပုံကို ဒီ Chat ထဲမှာ ပို့ပါ။\nပုံပို့ပြီးရင် နောက်အဆင့်ကို အလိုလိုသွားပါမယ်။',
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
+        [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')],
         [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
       ])
     }
+  );
+});
+
+// ❌ Cancel Add Movie
+bot.action('cancel_addmovie', (ctx) => {
+  ctx.answerCbQuery();
+  if (addMovieState[ctx.from.id]) {
+    delete addMovieState[ctx.from.id];
+  }
+  ctx.editMessageText('❌ ရုပ်ရှင်ထည့်ခြင်း ပယ်ဖျက်ပြီးပါပြီ', {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+    ])
+  });
+});
+
+// ⏭️ Skip Video - Video မပါရင် ချန်လှပ်
+bot.action('skip_video', async (ctx) => {
+  if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
+  ctx.answerCbQuery();
+
+  const adminId = ctx.from.id;
+  const state = addMovieState[adminId];
+
+  if (!state) {
+    ctx.editMessageText('❌ Session မရှိပါ။ /addmovie ကိုပြန်စပါ');
+    return;
+  }
+
+  // ဇတ်ကားအမည်ကို Overview ပထမစာကြောင်းကနေယူမယ်
+  const overviewLines = state.overview.split('\n');
+  const titleLine = overviewLines[0].replace(/\*/g, '').trim();
+  const overviewText = overviewLines.slice(1).join('\n').trim() || state.overview;
+
+  const newMovie = {
+    title: titleLine || 'Unknown Movie',
+    poster_file_id: state.poster_file_id,
+    overview: state.overview,
+    overview_text: overviewText,
+    video_file_id: '', // Video မပါ
+    addedBy: ctx.from.first_name,
+    addedAt: new Date().toISOString()
+  };
+
+  if (!botData.adminMovies) botData.adminMovies = [];
+  botData.adminMovies.push(newMovie);
+  saveData();
+
+  delete addMovieState[adminId];
+
+  await ctx.editMessageText(
+    `✅ *ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ! (Video မပါ)*\n\n🎬 ${newMovie.title}\n🖼️ Poster ✅\n📝 Overview ✅\n🎬 Video ⏭️ ချန်လှပ်\n\n🔍 User တွေက /search ${newMovie.title} နဲ့ ရှာလို့ရပါပြီ`,
+    { parse_mode: 'Markdown' }
   );
 });
 
@@ -725,36 +869,24 @@ bot.command('notify', (ctx) => {
   ctx.reply(`🔔 Notification ပို့ပြီးပါပြီ!\n\n✅ ပို့ရမှု: ${sentCount}\n❌ မပို့နိုင်: ${failCount}`);
 });
 
-// /addmovie command
+// /addmovie command - Step 1 ကိုစမယ်
 bot.command('addmovie', (ctx) => {
   if (!isAdmin(ctx)) {
     ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
     return;
   }
 
-  const args = ctx.message.text.replace('/addmovie', '').trim();
-  const parts = args.split('|').map(p => p.trim());
+  addMovieState[ctx.from.id] = { step: 1, poster_file_id: '', title: '', overview: '' };
 
-  if (parts.length < 5) {
-    ctx.reply('🎬 Format:\n`/addmovie အမျိုးအစား | အမည် | နှစ် | Rating | ဖော်ပြချက်`', { parse_mode: 'Markdown' });
-    return;
-  }
-
-  const [category, title, year, rating, desc] = parts;
-
-  if (!moviesDB[category]) {
-    ctx.reply(`❌ အမျိုးအစား "${category}" မရှိပါ။\nရနိုင်သည်: action, comedy, horror, romance, scifi`);
-    return;
-  }
-
-  moviesDB[category].unshift({
-    title: title,
-    year: parseInt(year) || 2024,
-    rating: rating,
-    desc: desc
-  });
-
-  ctx.reply(`✅ ရုပ်ရှင်အသစ်ထည့်ပြီး!\n\n🎬 ${title}\n📂 ${category}\n⭐ ${rating}\n📅 ${year}`);
+  ctx.reply(
+    '🎬 *ရုပ်ရှင်အသစ်ထည့်ရန် - အဆင့် ၁/၃*\n\n🖼️ *Movie Poster ပို့ပါ*\n\nရုပ်ရှင် Poster ပုံကို ဒီ Chat ထဲမှာ ပို့ပါ။\nပုံပို့ပြီးရင် နောက်အဆင့်ကို အလိုလိုသွားပါမယ်။',
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
+      ])
+    }
+  );
 });
 
 // /addseries command
@@ -881,7 +1013,7 @@ bot.command('categories', (ctx) => {
 // ============================================
 // /search command
 // ============================================
-bot.command('search', (ctx) => {
+bot.command('search', async (ctx) => {
   botData.stats.commandsUsed++;
   botData.stats.searches++;
   saveData();
@@ -890,7 +1022,7 @@ bot.command('search', (ctx) => {
 
   if (!query) {
     ctx.reply(
-      '🔍 *ရုပ်ရှင်/Series ရှာဖွေရန်*\n\nရှာလိုသောအမည်ကို အောက်ပါပုံစံဖြင့်ပို့ပါ:\n\n`/search ရုပ်ရှင်အမည်`\n\nဥပမာ:\n`/search Avengers`\n`/search Squid Game`\n`/search action`',
+      '🔍 *ရုပ်ရှင်/Series ရှာဖွေရန်*\n\nရှာလိုသောအမည်ကို အောက်ပါပုံစံဖြင့်ပို့ပါ:\n\n`/search ရုပ်ရှင်အမည်`\n\nဥပမာ:\n`/search Avengers`\n`/search Appleseed Ex Machina`',
       { parse_mode: 'Markdown' }
     );
     return;
@@ -898,6 +1030,12 @@ bot.command('search', (ctx) => {
 
   const queryLower = query.toLowerCase();
 
+  // Admin Movies ထဲမှာရှာမယ် (Poster + Overview + Video ပါတဲ့ ဇတ်ကားတွေ)
+  const adminMovieResults = (botData.adminMovies || []).filter(m =>
+    m.title.toLowerCase().includes(queryLower)
+  );
+
+  // Built-in moviesDB ထဲမှာရှာမယ်
   const movieResults = [];
   for (const [cat, movies] of Object.entries(moviesDB)) {
     for (const movie of movies) {
@@ -907,6 +1045,7 @@ bot.command('search', (ctx) => {
     }
   }
 
+  // Built-in seriesDB ထဲမှာရှာမယ်
   const seriesResults = [];
   for (const [cat, shows] of Object.entries(seriesDB)) {
     for (const show of shows) {
@@ -916,7 +1055,30 @@ bot.command('search', (ctx) => {
     }
   }
 
-  if (movieResults.length === 0 && seriesResults.length === 0) {
+  // Admin Movie ရှာတွေ့ရင် - Poster + Overview + Video ပြမယ်
+  if (adminMovieResults.length > 0) {
+    for (const movie of adminMovieResults.slice(0, 3)) {
+      // 1. Poster ပြမယ်
+      if (movie.poster_file_id) {
+        await ctx.replyWithPhoto(movie.poster_file_id, {
+          caption: `🎬 *${movie.title}*\n\n📝 *Overview:*\n${movie.overview}`,
+          parse_mode: 'Markdown'
+        });
+      } else {
+        await ctx.reply(`🎬 *${movie.title}*\n\n📝 *Overview:*\n${movie.overview}`, { parse_mode: 'Markdown' });
+      }
+
+      // 2. Video ပြမယ်
+      if (movie.video_file_id) {
+        await ctx.replyWithVideo(movie.video_file_id, {
+          caption: `🎬 ${movie.title} - Video`,
+        });
+      }
+    }
+  }
+
+  // Built-in results ပြမယ်
+  if (movieResults.length === 0 && seriesResults.length === 0 && adminMovieResults.length === 0) {
     ctx.reply(
       `🔍 *"${query}" ရှာမတွေ့ပါ*\n\nတခြားစကားလုံးနဲ့ ထပ်ရှာကြည့်ပါ`,
       {
@@ -930,24 +1092,35 @@ bot.command('search', (ctx) => {
     return;
   }
 
-  let resultText = `🔍 *"${query}" ရှာဖွေရလဒ်များ*\n\n`;
+  // Built-in movies/series ရလဒ်ပြမယ်
+  if (movieResults.length > 0 || seriesResults.length > 0) {
+    let resultText = `🔍 *"${query}" ရှာဖွေရလဒ်များ*\n\n`;
 
-  if (movieResults.length > 0) {
-    resultText += `*— ရုပ်ရှင်များ (${movieResults.length}) —*\n${formatList(movieResults.slice(0, 5), '🎬')}\n\n`;
+    if (movieResults.length > 0) {
+      resultText += `*— ရုပ်ရှင်များ (${movieResults.length}) —*\n${formatList(movieResults.slice(0, 5), '🎬')}\n\n`;
+    }
+
+    if (seriesResults.length > 0) {
+      resultText += `*— TV Shows (${seriesResults.length}) —*\n${formatList(seriesResults.slice(0, 5), '📺')}\n\n`;
+    }
+
+    resultText += '📌 ပိုမိုကြည့်ရှုလိုပါက Kumastream App တွင် ဝင်ရောက်ကြည့်ရှုပါ';
+
+    ctx.reply(resultText, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔙 ပင်မမီနူး', 'back_menu')]
+      ])
+    });
+  } else if (adminMovieResults.length > 0) {
+    // Admin movies ပဲရှိရင် ပင်မမီနူးပြန်ပြ
+    ctx.reply('👆 ဇတ်ကားရလဒ်များ အပေါ်မှာပါ', {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔙 ပင်မမီနူး', 'back_menu')]
+      ])
+    });
   }
-
-  if (seriesResults.length > 0) {
-    resultText += `*— TV Shows (${seriesResults.length}) —*\n${formatList(seriesResults.slice(0, 5), '📺')}\n\n`;
-  }
-
-  resultText += '📌 ပိုမိုကြည့်ရှုလိုပါက Kumastream App တွင် ဝင်ရောက်ကြည့်ရှုပါ';
-
-  ctx.reply(resultText, {
-    parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([
-      [Markup.button.callback('🔙 ပင်မမီနူး', 'back_menu')]
-    ])
-  });
 });
 
 // ============================================
