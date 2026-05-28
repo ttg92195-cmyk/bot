@@ -34,8 +34,22 @@ const WEB_URL = process.env.WEB_URL || '';
 // ============================================
 // ADMIN MOVIE ADDING STATE + SEARCH STATE
 // ============================================
-const addMovieState = {}; // { adminId: { step: 1|2|3, waitingTitle: false, poster_file_id: '', title: '', overview: '' } }
+const addMovieState = {}; // { adminId: { step: 1|2|3, waitingTitle: false, poster_file_id: '', title: '', overview: '', createdAt: Date.now() } }
 const searchState = {};  // { userId: true }
+
+// ============================================
+// STATE TIMEOUT: 5 မိနစ်ပြည့်ရင် state ကို auto-cancel မယ်
+// ============================================
+const ADD_MOVIE_TIMEOUT = 5 * 60 * 1000; // 5 မိနစ်
+function checkStateTimeout(adminId) {
+  const state = addMovieState[adminId];
+  if (state && state.createdAt && (Date.now() - state.createdAt > ADD_MOVIE_TIMEOUT)) {
+    console.log(`⏰ State timeout for admin ${adminId} - auto cancelling`);
+    delete addMovieState[adminId];
+    return true; // timed out
+  }
+  return false; // still valid
+}
 
 // ============================================
 // MONGOOSE SCHEMAS
@@ -460,6 +474,17 @@ bot.use(async (ctx, next) => {
   const state = addMovieState[adminId];
 
   if (state && isAdmin(ctx)) {
+    // State timeout စစ်ဆေးမယ် - 5 မိနစ်ကျော်ရင် auto cancel
+    if (checkStateTimeout(adminId)) {
+      await ctx.reply(
+        '⏰ *Add Movie Session သက်တမ်းကုန်ဆုံးပါပြီး*\n\n5 မိနစ်ကျော်သွားလို့ Session ကို အလိုအလျောက်ပိတ်ပါပြီ။\n\n💡 ပြန်စချင်ရင် /addmovie ဒါမှမဟုတ် /admin ကနေ ပြန်စပါ။',
+        { parse_mode: 'Markdown' }
+      );
+      return next();
+    }
+
+    // Debug: Admin state ကို log လုပ်မယ်
+    console.log(`🔄 Admin ${adminId} in addMovieState: step=${state.step}, waitingTitle=${state.waitingTitle}, title="${state.title || ''}"`);
 
     // STEP 1: Poster (Photo) လက်ခံခြင်း + Caption ကနေ ရုပ်ရှင်အမည်ယူမယ်
     if (state.step === 1 && ctx.message && ctx.message.photo) {
@@ -541,13 +566,31 @@ bot.use(async (ctx, next) => {
     }
 
     // STEP 3: Video File လက်ခံခြင်း
-    // Video, Document, Animation သုံးမျိုးလုံးလက်ခံမယ်
+    // Video, Document, Animation, Video Note, Audio အကုန်လက်ခံမယ်
     const msgVideo = ctx.message && ctx.message.video;
     const msgDoc = ctx.message && ctx.message.document;
     const msgAnim = ctx.message && ctx.message.animation;
+    const msgVideoNote = ctx.message && ctx.message.video_note;
+    const msgAudio = ctx.message && ctx.message.audio;
+    const msgVoice = ctx.message && ctx.message.voice;
+    const msgPhoto = ctx.message && ctx.message.photo;
 
-    if (state.step === 3 && ctx.message && (msgVideo || msgDoc || msgAnim)) {
-      // video_type ခွဲခြားမှ: 'video', 'document', 'animation'
+    // Debug: Step 3 မှာ message type ကို log လုပ်မယ်
+    if (state.step === 3 && ctx.message) {
+      console.log(`📥 Step 3 DEBUG: Message received from admin ${adminId}`);
+      console.log(`   - has video: ${!!msgVideo}`);
+      console.log(`   - has document: ${!!msgDoc}`);
+      console.log(`   - has animation: ${!!msgAnim}`);
+      console.log(`   - has video_note: ${!!msgVideoNote}`);
+      console.log(`   - has audio: ${!!msgAudio}`);
+      console.log(`   - has voice: ${!!msgVoice}`);
+      console.log(`   - has photo: ${!!msgPhoto}`);
+      console.log(`   - has text: ${!!(ctx.message && ctx.message.text)}`);
+      console.log(`   - message keys: ${Object.keys(ctx.message).join(', ')}`);
+    }
+
+    if (state.step === 3 && ctx.message && (msgVideo || msgDoc || msgAnim || msgVideoNote || msgAudio || msgVoice)) {
+      // video_type ခွဲခြားမှ: 'video', 'document', 'animation', 'video_note', 'audio', 'voice'
       let videoFileId = '';
       let videoType = '';
       if (msgVideo) {
@@ -558,6 +601,15 @@ bot.use(async (ctx, next) => {
         videoType = 'animation';
       } else if (msgDoc) {
         videoFileId = msgDoc.file_id;
+        videoType = 'document';
+      } else if (msgVideoNote) {
+        videoFileId = msgVideoNote.file_id;
+        videoType = 'video';
+      } else if (msgAudio) {
+        videoFileId = msgAudio.file_id;
+        videoType = 'document';
+      } else if (msgVoice) {
+        videoFileId = msgVoice.file_id;
         videoType = 'document';
       }
 
@@ -603,6 +655,22 @@ bot.use(async (ctx, next) => {
         );
         // State ကို မဖျက်ဘဲ ထားမယ် - user က ပြန်စမ်းချင်ရင် အတွက်
       }
+      return;
+    }
+
+    // STEP 3 FALLBACK: Video မပို့ဘဲ တခြား message ပို့ရင် သတိပေးမယ်
+    if (state.step === 3 && ctx.message && !(ctx.message.text && ctx.message.text.startsWith('/'))) {
+      console.log(`📥 Step 3: Unexpected message type from admin ${adminId} - asking for video again`);
+      await ctx.reply(
+        '⚠️ *Video File ပို့ပါ*\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။\n\n💡 အကြံပြုချက်:\n• Video ကို Video အနေနဲ့ပို့ပါ\n• File အနေနဲ့ပို့ချင်ရင် "Send as File" နဲ့ပို့ပါ\n• ကြီးမားတဲ့ Video တွေအတွက် အချိန်အနည်းငယ်စောင့်ပါ',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('⏭️ Video မပါ', 'skip_video')],
+            [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
+          ])
+        }
+      );
       return;
     }
   }
@@ -1045,7 +1113,7 @@ bot.action('admin_addmovie', (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
   ctx.answerCbQuery();
 
-  addMovieState[ctx.from.id] = { step: 1, waitingTitle: false, poster_file_id: '', title: '', overview: '' };
+  addMovieState[ctx.from.id] = { step: 1, waitingTitle: false, poster_file_id: '', title: '', overview: '', createdAt: Date.now() };
 
   ctx.editMessageText(
     '🎬 *ရုပ်ရှင်အသစ်ထည့်ရန် - အဆင့် ၁/၃*\n\n🖼️ *Movie Poster ပို့ပါ*\n\nရုပ်ရှင် Poster ပုံကို ဒီ Chat ထဲမှာ ပို့ပါ။\n📌 ရုပ်ရှင်အမည်ကို Poster Caption မှာရိုက်ပါ!\n\n📌 အဆင့် ၃ ဆင့်ရှိပါတယ်:\n၁။ Poster ပုံ (Caption မှာ ရုပ်ရှင်အမည်ရိုက်ပါ)\n၂။ Overview/ဖော်ပြချက်\n၃။ Video File\n\n💡 Caption မပါရင် နောက်မှ အမည်မေးပါမယ်',
@@ -1473,6 +1541,26 @@ bot.command('deletemovie', async (ctx) => {
   );
 });
 
+// /canceladdmovie command - State ကို ပယ်ဖျက်ချင်ရင်
+bot.command('canceladdmovie', (ctx) => {
+  if (!isAdmin(ctx)) {
+    ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
+    return;
+  }
+
+  if (addMovieState[ctx.from.id]) {
+    delete addMovieState[ctx.from.id];
+    ctx.reply('❌ Add Movie Session ကို ပယ်ဖျက်ပြီးပါပြီ။\n\nပြန်စချင်ရင် /addmovie ရိုက်ပါ။', {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+      ])
+    });
+  } else {
+    ctx.reply('ℹ️ လက်ရှိ Add Movie Session မရှိပါ။');
+  }
+});
+
 // /addmovie command - 3 Step Flow
 bot.command('addmovie', (ctx) => {
   if (!isAdmin(ctx)) {
@@ -1481,7 +1569,7 @@ bot.command('addmovie', (ctx) => {
     return;
   }
 
-  addMovieState[ctx.from.id] = { step: 1, waitingTitle: false, poster_file_id: '', title: '', overview: '' };
+  addMovieState[ctx.from.id] = { step: 1, waitingTitle: false, poster_file_id: '', title: '', overview: '', createdAt: Date.now() };
 
   ctx.reply(
     '🎬 *ရုပ်ရှင်အသစ်ထည့်ရန် - အဆင့် ၁/၃*\n\n🖼️ *Movie Poster ပို့ပါ*\n\nရုပ်ရှင် Poster ပုံကို ဒီ Chat ထဲမှာ ပို့ပါ။\n📌 ရုပ်ရှင်အမည်ကို Poster Caption မှာရိုက်ပါ!\n\n📌 အဆင့် ၃ ဆင့်ရှိပါတယ်:\n၁။ Poster ပုံ (Caption မှာ ရုပ်ရှင်အမည်ရိုက်ပါ)\n၂။ Overview/ဖော်ပြချက်\n၃။ Video File\n\n💡 Caption မပါရင် နောက်မှ အမည်မေးပါမယ်',
@@ -2165,6 +2253,13 @@ bot.hears(/hi/i, (ctx) => {
 // Smart Response
 // ============================================
 bot.on('message', (ctx) => {
+  // Admin က Add Movie flow မှာဆိုရင် ဒီ handler ကို မဝင်ပါနဲ့
+  const adminId = ctx.from ? ctx.from.id : 0;
+  const addState = addMovieState[adminId];
+  if (addState && isAdmin(ctx)) {
+    return; // Add Movie flow ကို မနှောက်ယှက်ပါနဲ့
+  }
+
   const text = ctx.message.text;
   if (!text) return;
 
