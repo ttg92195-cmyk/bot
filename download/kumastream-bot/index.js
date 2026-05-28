@@ -1693,92 +1693,50 @@ bot.command('deletemovie', async (ctx) => {
   );
 });
 
-// /dbstatus command - MongoDB connection status စစ်ဆေးရန်
-bot.command('dbstatus', async (ctx) => {
-  if (!isAdmin(ctx)) {
-    ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
-    return;
-  }
-
-  const readyState = mongoose.connection.readyState;
-  const stateNames = {
-    0: '❌ Disconnected',
-    1: '✅ Connected',
-    2: '🔄 Connecting...',
-    3: '⚠️ Disconnecting'
-  };
-  const stateName = stateNames[readyState] || '❓ Unknown';
-
-  let movieCount = 0;
-  let userCount = 0;
-  if (dbConnected && readyState === 1) {
-    try {
-      movieCount = await Movie.countDocuments();
-      userCount = await User.countDocuments();
-    } catch (err) { console.error('dbstatus count error:', err.message); }
-  }
-
-  let statusText = `📊 *MongoDB Connection Status*\n\n`;
-  statusText += `🔌 dbConnected: ${dbConnected ? '✅ True' : '❌ False'}\n`;
-  statusText += `📡 Mongoose State: ${stateName} (${readyState})\n`;
-  statusText += `🎬 Movies: ${movieCount}\n`;
-  statusText += `👥 Users: ${userCount}\n`;
-  statusText += `🔗 URI: ${MONGODB_URI ? '✅ Set' : '❌ Not Set'}\n`;
-
-  if (!dbConnected) {
-    statusText += `\n⚠️ *MongoDB ချိတ်ဆက်မရပါ!*\n\nဖြေရှင်းနည်း:\n`;
-    statusText += `1. MongoDB Atlas → Network Access → 0.0.0.0/0 Add\n`;
-    statusText += `2. Railway → Environment Variables → MONGODB_URI စစ်ပါ\n`;
-    statusText += `3. MongoDB Atlas → Database Access → User/Password စစ်ပါ`;
-  }
-
-  const buttons = [];
-  if (!dbConnected) {
-    buttons.push([Markup.button.callback('🔄 Reconnect MongoDB', 'admin_reconnect_db')]);
-  }
-  buttons.push([Markup.button.callback('🔙 Admin Panel', 'admin_back')]);
-
-  ctx.reply(statusText, {
-    parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard(buttons)
-  });
-});
+// /dbstatus command ကို အောက်မှာ သတ်မှတ်ထားပြီးပါပြီ (Duplicate removed)
 
 // 🔄 Admin Reconnect MongoDB
 bot.action('admin_reconnect_db', async (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
   ctx.answerCbQuery('🔄 Reconnecting...');
 
-  await ctx.editMessageText('🔄 *MongoDB ပြန်ချိတ်ဆက်နေပါသည်...*', { parse_mode: 'Markdown' });
+  try {
+    await ctx.editMessageText('🔄 <b>MongoDB ပြန်ချိတ်ဆက်နေပါသည်...</b>', { parse_mode: 'HTML' });
 
-  await connectDB();
+    await connectDB();
 
-  const readyState = mongoose.connection.readyState;
-  const stateNames = { 0: '❌ Disconnected', 1: '✅ Connected', 2: '🔄 Connecting...', 3: '⚠️ Disconnecting' };
+    const readyState = mongoose.connection.readyState;
+    const stateNames = { 0: '❌ Disconnected', 1: '✅ Connected', 2: '🔄 Connecting...', 3: '⚠️ Disconnecting' };
 
-  if (dbConnected && readyState === 1) {
-    let movieCount = 0;
-    try { movieCount = await Movie.countDocuments(); } catch(e) {}
-    await ctx.editMessageText(
-      `✅ *MongoDB ပြန်ချိတ်ဆက်ပြီးပါပြီ!*\n\n🔌 State: ${stateNames[readyState]}\n🎬 Movies: ${movieCount}`,
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
-        ])
-      }
-    );
-  } else {
-    await ctx.editMessageText(
-      `❌ *MongoDB ပြန်ချိတ်ဆက်မရပါ!*\n\n🔌 State: ${stateNames[readyState]}\n\n💡 MongoDB Atlas → Network Access → 0.0.0.0/0 ကိုစစ်ပါ`,
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('🔄 Retry', 'admin_reconnect_db')],
-          [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
-        ])
-      }
-    );
+    if (dbConnected && readyState === 1) {
+      let movieCount = 0;
+      try { movieCount = await Movie.countDocuments(); } catch(e) {}
+      await ctx.editMessageText(
+        `✅ <b>MongoDB ပြန်ချိတ်ဆက်ပြီးပါပြီ!</b>\n\n🔌 State: ${stateNames[readyState]}\n🎬 Movies: ${movieCount}`,
+        {
+          parse_mode: 'HTML',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+          ])
+        }
+      );
+    } else {
+      await ctx.editMessageText(
+        `❌ <b>MongoDB ပြန်ချိတ်ဆက်မရပါ!</b>\n\n🔌 State: ${stateNames[readyState]}\n\n💡 MongoDB Atlas → Network Access → 0.0.0.0/0 ကိုစစ်ပါ`,
+        {
+          parse_mode: 'HTML',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Retry', 'admin_reconnect_db')],
+            [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+          ])
+        }
+      );
+    }
+  } catch (err) {
+    console.error('admin_reconnect_db error:', err.message);
+    try {
+      ctx.reply('❌ MongoDB ပြန်ချိတ်ဆက်မှု မအောင်မြင်ပါ။ /dbstatus နဲ့ စစ်ပါ။');
+    } catch (e) {}
   }
 });
 
