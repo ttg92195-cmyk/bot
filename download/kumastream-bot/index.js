@@ -1118,41 +1118,49 @@ bot.action('admin_dbstatus', async (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
   ctx.answerCbQuery();
 
-  const readyState = mongoose.connection.readyState;
-  const stateNames = { 0: '❌ Disconnected', 1: '✅ Connected', 2: '🔄 Connecting...', 3: '⚠️ Disconnecting' };
-  const stateName = stateNames[readyState] || '❓ Unknown';
+  try {
+    const readyState = mongoose.connection.readyState;
+    const stateNames = { 0: '❌ Disconnected', 1: '✅ Connected', 2: '🔄 Connecting...', 3: '⚠️ Disconnecting' };
+    const stateName = stateNames[readyState] || '❓ Unknown';
 
-  let movieCount = 0, userCount = 0;
-  if (dbConnected && readyState === 1) {
+    let movieCount = 0, userCount = 0;
+    if (dbConnected && readyState === 1) {
+      try {
+        movieCount = await Movie.countDocuments();
+        userCount = await User.countDocuments();
+      } catch (err) { console.error('admin_dbstatus count error:', err.message); }
+    }
+
+    // HTML parse_mode သုံးမယ် - Markdown က _ နဲ့ / တွေကို မှားယွင်း parse လုပ်လို့
+    let statusText = `📊 <b>MongoDB Connection Status</b>\n\n`;
+    statusText += `🔌 dbConnected: ${dbConnected ? '✅ True' : '❌ False'}\n`;
+    statusText += `📡 Mongoose State: ${stateName} (${readyState})\n`;
+    statusText += `🎬 Movies: ${movieCount}\n`;
+    statusText += `👥 Users: ${userCount}\n`;
+
+    if (!dbConnected) {
+      statusText += `\n⚠️ <b>MongoDB ချိတ်ဆက်မရပါ!</b>\n\nဖြေရှင်းနည်း:\n`;
+      statusText += `1. MongoDB Atlas → Network Access → 0.0.0.0/0\n`;
+      statusText += `2. Railway → <code>MONGODB_URI</code> စစ်ပါ\n`;
+      statusText += `3. MongoDB Atlas → User/Password စစ်ပါ`;
+    }
+
+    const buttons = [];
+    if (!dbConnected) {
+      buttons.push([Markup.button.callback('🔄 Reconnect MongoDB', 'admin_reconnect_db')]);
+    }
+    buttons.push([Markup.button.callback('🔙 Admin Panel', 'admin_back')]);
+
+    ctx.editMessageText(statusText, {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard(buttons)
+    });
+  } catch (err) {
+    console.error('admin_dbstatus error:', err.message);
     try {
-      movieCount = await Movie.countDocuments();
-      userCount = await User.countDocuments();
-    } catch (err) { console.error('admin_dbstatus error:', err.message); }
+      ctx.reply('❌ DB Status ပြမှုမအောင်မြင်ပါ။ /dbstatus ကို ကြိုးစားပါ။');
+    } catch (e) {}
   }
-
-  let statusText = `📊 *MongoDB Connection Status*\n\n`;
-  statusText += `🔌 dbConnected: ${dbConnected ? '✅ True' : '❌ False'}\n`;
-  statusText += `📡 Mongoose State: ${stateName} (${readyState})\n`;
-  statusText += `🎬 Movies: ${movieCount}\n`;
-  statusText += `👥 Users: ${userCount}\n`;
-
-  if (!dbConnected) {
-    statusText += `\n⚠️ *MongoDB ချိတ်ဆက်မရပါ!*\n\nဖြေရှင်းနည်း:\n`;
-    statusText += `1. MongoDB Atlas → Network Access → 0.0.0.0/0\n`;
-    statusText += `2. Railway → MONGODB_URI စစ်ပါ\n`;
-    statusText += `3. MongoDB Atlas → User/Password စစ်ပါ`;
-  }
-
-  const buttons = [];
-  if (!dbConnected) {
-    buttons.push([Markup.button.callback('🔄 Reconnect MongoDB', 'admin_reconnect_db')]);
-  }
-  buttons.push([Markup.button.callback('🔙 Admin Panel', 'admin_back')]);
-
-  ctx.editMessageText(statusText, {
-    parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard(buttons)
-  });
 });
 
 // 📊 Admin Stats
@@ -1826,7 +1834,7 @@ bot.command('dbstatus', async (ctx) => {
     try {
       const recent = await Movie.find().sort({ addedAt: -1 }).limit(5);
       if (recent.length > 0) {
-        lastMovies = '\n\n🎬 *နောက်ဆုံး ဇတ်ကားများ:*\n' + recent.map((m, i) => `${i + 1}. ${m.title}`).join('\n');
+        lastMovies = '\n\n🎬 <b>နောက်ဆုံး ဇတ်ကားများ:</b>\n' + recent.map((m, i) => `${i + 1}. ${escapeHtml(m.title)}`).join('\n');
       } else {
         lastMovies = '\n\n⚠️ Database မှာ ဇတ်ကား တစ်ကားမှ မရှိပါ!';
       }
@@ -1835,17 +1843,18 @@ bot.command('dbstatus', async (ctx) => {
     }
   }
 
+  // HTML parse_mode သုံးမယ် - Markdown က URI ထဲက :// နဲ့ _ တွေကို မှားယွင်း parse လုပ်လို့
   const maskedURI = MONGODB_URI ? MONGODB_URI.replace(/:([^@]+)@/, ':****@') : '❌ မထည့်ထားပါ!';
 
-  const statusText = `🔍 *MongoDB Database Status*\n\n` +
+  const statusText = `🔍 <b>MongoDB Database Status</b>\n\n` +
     `🔌 Connection: ${stateNames[readyState]}\n` +
     `📊 dbConnected flag: ${dbConnected ? '✅ true' : '❌ false'}\n` +
-    `🗄️ Database: ${dbName}\n` +
-    `🌐 Host: ${dbHost}\n` +
-    `🔗 URI: ${maskedURI}\n\n` +
+    `🗄️ Database: ${escapeHtml(dbName)}\n` +
+    `🌐 Host: ${escapeHtml(dbHost)}\n` +
+    `🔗 URI: <code>${escapeHtml(maskedURI)}</code>\n\n` +
     `👥 Users: ${userCount}\n` +
     `🎬 Movies: ${movieCount}${lastMovies}\n\n` +
-    `⚠️ MONGODB_URI ${MONGODB_URI ? '✅ ရှိပါတယ်' : '❌ မရှိပါ! Railway → Variables မှာ ထည့်ပါ!'}`;
+    `⚠️ <code>MONGODB_URI</code> ${MONGODB_URI ? '✅ ရှိပါတယ်' : '❌ မရှိပါ! Railway → Variables မှာ ထည့်ပါ!'}`;
 
   const buttons = [];
   if (!dbConnected) {
@@ -1854,7 +1863,7 @@ bot.command('dbstatus', async (ctx) => {
   buttons.push([Markup.button.callback('🔙 Admin Panel', 'admin_back')]);
 
   ctx.reply(statusText, {
-    parse_mode: 'Markdown',
+    parse_mode: 'HTML',
     ...Markup.inlineKeyboard(buttons)
   });
 });
