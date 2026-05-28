@@ -86,41 +86,54 @@ const Notification = mongoose.model('Notification', notificationSchema);
 // MONGODB CONNECTION
 // ============================================
 const MONGODB_URI = process.env.MONGODB_URI;
-if (!MONGODB_URI) {
-  console.error('MONGODB_URI environment variable မရှိပါ!');
-  process.exit(1);
-}
+let dbConnected = false;
 
 // ============================================
 // HELPER: Stats functions (singleton document)
 // ============================================
 async function getStats() {
-  let stats = await Stats.findOne();
-  if (!stats) {
-    stats = await Stats.create({});
+  if (!dbConnected) return { totalMessages: 0, commandsUsed: 0, searches: 0, startedAt: new Date() };
+  try {
+    let stats = await Stats.findOne();
+    if (!stats) {
+      stats = await Stats.create({});
+    }
+    return stats;
+  } catch (err) {
+    console.error('getStats error:', err.message);
+    return { totalMessages: 0, commandsUsed: 0, searches: 0, startedAt: new Date() };
   }
-  return stats;
 }
 
 async function incStats(field, amount = 1) {
-  await Stats.findOneAndUpdate({}, { $inc: { [field]: amount } }, { upsert: true });
+  if (!dbConnected) return;
+  try {
+    await Stats.findOneAndUpdate({}, { $inc: { [field]: amount } }, { upsert: true });
+  } catch (err) {
+    console.error('incStats error:', err.message);
+  }
 }
 
 // ============================================
 // HELPER: Register user (async with MongoDB)
 // ============================================
 async function registerUser(ctx) {
-  const userId = ctx.from.id.toString();
-  await User.findOneAndUpdate(
-    { userId },
-    {
-      userId,
-      first_name: ctx.from.first_name || 'Unknown',
-      username: ctx.from.username || '',
-      lastActive: new Date()
-    },
-    { upsert: true, new: true }
-  );
+  if (!dbConnected) return;
+  try {
+    const userId = ctx.from.id.toString();
+    await User.findOneAndUpdate(
+      { userId },
+      {
+        userId,
+        first_name: ctx.from.first_name || 'Unknown',
+        username: ctx.from.username || '',
+        lastActive: new Date()
+      },
+      { upsert: true, new: true }
+    );
+  } catch (err) {
+    console.error('registerUser error:', err.message);
+  }
 }
 
 // Check admin
@@ -154,12 +167,33 @@ function escapeHtml(text) {
 // ============================================
 // MONGODB CONNECT + STARTUP
 // ============================================
-console.log('🚀 Kumastream Bot စတင်ပါပြီ!');
-console.log('🗄️ MongoDB Atlas ချိတ်ဆက်နေပါသည်...');
+async function connectDB() {
+  if (!MONGODB_URI) {
+    console.warn('⚠️ MONGODB_URI မထည့်ထားပါ! Bot က MongoDB မပါဘဲ လည်ပါမယ်။');
+    console.warn('⚠️ User registration, Movie storage တွေ မသိမ်းဆည်းနိုင်ပါ။');
+    return;
+  }
 
-mongoose.connect(MONGODB_URI)
-  .then(async () => {
+  console.log('🗄️ MongoDB Atlas ချိတ်ဆက်နေပါသည်...');
+
+  // Database name ထည့်မယ် (မပါရင် kumastream လို့သတ်မှတ်မယ်)
+  let connectURI = MONGODB_URI;
+  // Check if database name is missing: e.g. ends with .net/ or .net/? or .net/?appName
+  const dbMatch = connectURI.match(/mongodb\.net\/([^?]+)/);
+  if (!dbMatch || !dbMatch[1] || dbMatch[1].trim() === '') {
+    // No database name found, insert 'kumastream'
+    connectURI = connectURI.replace('mongodb.net/?', 'mongodb.net/kumastream?');
+    if (!connectURI.includes('mongodb.net/kumastream')) {
+      connectURI = connectURI.replace('mongodb.net/', 'mongodb.net/kumastream?');
+    }
+  }
+  console.log(`🔗 Connecting to: ${connectURI.replace(/:([^@]+)@/, ':****@')}`);
+
+  try {
+    await mongoose.connect(connectURI);
+    dbConnected = true;
     console.log('✅ MongoDB သို့ ချိတ်ဆက်ပြီးပါပြီ!');
+
     const userCount = await User.countDocuments();
     const movieCount = await Movie.countDocuments();
     const stats = await getStats();
@@ -167,8 +201,13 @@ mongoose.connect(MONGODB_URI)
     console.log(`   - Users: ${userCount}`);
     console.log(`   - Movies: ${movieCount}`);
     console.log(`   - Searches: ${stats.searches || 0}`);
-  })
-  .catch(err => console.error('❌ MongoDB ချိတ်ဆက်မရ:', err.message));
+  } catch (err) {
+    console.error('❌ MongoDB ချိတ်ဆက်မရ:', err.message);
+    console.warn('⚠️ Bot က MongoDB မပါဘဲ ဆက်လည်ပါမယ်...');
+  }
+}
+
+console.log('🚀 Kumastream Bot စတင်ပါပြီ!');
 
 // ============================================
 // MOVIES DATABASE
@@ -501,9 +540,14 @@ const mainMenu = Markup.inlineKeyboard([
 bot.start(async (ctx) => {
   await incStats('commandsUsed');
 
-  const userId = ctx.from.id.toString();
-  const user = await User.findOne({ userId });
-  const subStatus = user && user.subscribed ? ' ✅ စာရင်းသွင်းပြီး' : '';
+  let subStatus = '';
+  if (dbConnected) {
+    try {
+      const userId = ctx.from.id.toString();
+      const user = await User.findOne({ userId });
+      subStatus = user && user.subscribed ? ' ✅ စာရင်းသွင်းပြီး' : '';
+    } catch (err) { console.error('start user lookup error:', err.message); }
+  }
 
   const welcomeText = `
 🎬 *Kumastream မှ ကြိုဆိုပါတယ်!*
@@ -602,9 +646,14 @@ Kumastream သည် ရုပ်ရှင်များနှင့် TV Show
 bot.command('subscribe', async (ctx) => {
   await incStats('commandsUsed');
 
-  const userId = ctx.from.id.toString();
-  const user = await User.findOne({ userId });
-  const isSubscribed = user && user.subscribed;
+  let isSubscribed = false;
+  if (dbConnected) {
+    try {
+      const userId = ctx.from.id.toString();
+      const user = await User.findOne({ userId });
+      isSubscribed = user && user.subscribed;
+    } catch (err) { console.error('subscribe lookup error:', err.message); }
+  }
 
   if (isSubscribed) {
     ctx.reply(
@@ -634,8 +683,12 @@ bot.command('subscribe', async (ctx) => {
 // 🔔 စာရင်းသွင်း
 bot.action('do_subscribe', async (ctx) => {
   ctx.answerCbQuery();
-  const userId = ctx.from.id.toString();
-  await User.findOneAndUpdate({ userId }, { subscribed: true });
+  if (dbConnected) {
+    try {
+      const userId = ctx.from.id.toString();
+      await User.findOneAndUpdate({ userId }, { subscribed: true });
+    } catch (err) { console.error('subscribe error:', err.message); }
+  }
   ctx.editMessageText(
     '✅ *အကြောင်းကြားခြင်း စာရင်းသွင်းပြီးပါပြီ!*\n\nရုပ်ရှင်အသစ်၊ TV Shows အသစ်တင်ရင် သင့်ကို အကြောင်းကြားပေးပါမယ်။',
     {
@@ -651,8 +704,12 @@ bot.action('do_subscribe', async (ctx) => {
 // ❌ စာရင်းကနေပယ်ဖျက်
 bot.action('unsubscribe', async (ctx) => {
   ctx.answerCbQuery();
-  const userId = ctx.from.id.toString();
-  await User.findOneAndUpdate({ userId }, { subscribed: false });
+  if (dbConnected) {
+    try {
+      const userId = ctx.from.id.toString();
+      await User.findOneAndUpdate({ userId }, { subscribed: false });
+    } catch (err) { console.error('unsubscribe error:', err.message); }
+  }
   ctx.editMessageText(
     '❌ *အကြောင်းကြားခြင်း စာရင်းကနေ ပယ်ဖျက်ပြီးပါပြီ*\n\nထပ်စာရင်းသွင်းချင်ရင် /subscribe ကိုသုံးပါ။',
     {
@@ -668,9 +725,14 @@ bot.action('unsubscribe', async (ctx) => {
 // 🔔 ခလုတ်
 bot.action('subscribe', async (ctx) => {
   ctx.answerCbQuery();
-  const userId = ctx.from.id.toString();
-  const user = await User.findOne({ userId });
-  const isSubscribed = user && user.subscribed;
+  let isSubscribed = false;
+  if (dbConnected) {
+    try {
+      const userId = ctx.from.id.toString();
+      const user = await User.findOne({ userId });
+      isSubscribed = user && user.subscribed;
+    } catch (err) { console.error('subscribe action error:', err.message); }
+  }
 
   if (isSubscribed) {
     ctx.editMessageText(
@@ -703,13 +765,19 @@ bot.action('subscribe', async (ctx) => {
 bot.command('stats', async (ctx) => {
   await incStats('commandsUsed');
 
-  const stats = await getStats();
-  const totalUsers = await User.countDocuments();
-  const subscribedUsers = await User.countDocuments({ subscribed: true });
-  const today = new Date().toISOString().split('T')[0];
-  const todayUsers = await User.countDocuments({ lastActive: { $gte: new Date(today) } });
-  const uptime = Math.floor((Date.now() - new Date(stats.startedAt).getTime()) / (1000 * 60 * 60));
-  const movieCount = await Movie.countDocuments();
+  let totalUsers = 0, subscribedUsers = 0, todayUsers = 0, movieCount = 0, uptime = 0;
+  let statsData = { totalMessages: 0, commandsUsed: 0, searches: 0, startedAt: new Date() };
+  try {
+    statsData = await getStats();
+    if (dbConnected) {
+      totalUsers = await User.countDocuments();
+      subscribedUsers = await User.countDocuments({ subscribed: true });
+      const today = new Date().toISOString().split('T')[0];
+      todayUsers = await User.countDocuments({ lastActive: { $gte: new Date(today) } });
+      movieCount = await Movie.countDocuments();
+    }
+    uptime = Math.floor((Date.now() - new Date(statsData.startedAt).getTime()) / (1000 * 60 * 60));
+  } catch (err) { console.error('stats error:', err.message); }
 
   const statsText = `
 📊 *Kumastream Bot စာရင်းအချက်အလက်*
@@ -717,9 +785,9 @@ bot.command('stats', async (ctx) => {
 👥 စုစုပေါင်း User: *${totalUsers}* ယောက်
 🔔 စာရင်းသွင်းထားသူ: *${subscribedUsers}* ယောက်
 📅 ယနေ့ Active: *${todayUsers}* ယောက်
-💬 စုစုပေါင်း Message: *${stats.totalMessages}*
-⚡ Command အသုံးပြုမှု: *${stats.commandsUsed}*
-🔍 ရှာဖွေမှု: *${stats.searches}*
+💬 စုစုပေါင်း Message: *${statsData.totalMessages}*
+⚡ Command အသုံးပြုမှု: *${statsData.commandsUsed}*
+🔍 ရှာဖွေမှု: *${statsData.searches}*
 🎬 တင်ထားသော ဇတ်ကား: *${movieCount}* ကား (Limit မရှိပါ)
 ⏰ Bot Uptime: *${uptime} နာရီ*
 `;
@@ -742,9 +810,14 @@ bot.command('admin', async (ctx) => {
     return;
   }
 
-  const totalUsers = await User.countDocuments();
-  const subscribedUsers = await User.countDocuments({ subscribed: true });
-  const movieCount = await Movie.countDocuments();
+  let totalUsers = 0, subscribedUsers = 0, movieCount = 0;
+  if (dbConnected) {
+    try {
+      totalUsers = await User.countDocuments();
+      subscribedUsers = await User.countDocuments({ subscribed: true });
+      movieCount = await Movie.countDocuments();
+    } catch (err) { console.error('admin stats error:', err.message); }
+  }
 
   ctx.reply(
     `🛡️ *Admin Panel*\n\n👥 Users: ${totalUsers}\n🔔 Subscribed: ${subscribedUsers}\n🎬 Movies: ${movieCount} (Limit မရှိ)`,
@@ -777,16 +850,22 @@ bot.action('admin_stats', async (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
   ctx.answerCbQuery();
 
-  const stats = await getStats();
-  const totalUsers = await User.countDocuments();
-  const subscribedUsers = await User.countDocuments({ subscribed: true });
-  const today = new Date().toISOString().split('T')[0];
-  const todayUsers = await User.countDocuments({ lastActive: { $gte: new Date(today) } });
-  const uptime = Math.floor((Date.now() - new Date(stats.startedAt).getTime()) / (1000 * 60 * 60));
-  const movieCount = await Movie.countDocuments();
+  let totalUsers = 0, subscribedUsers = 0, todayUsers = 0, movieCount = 0, uptime = 0;
+  let statsData = { totalMessages: 0, commandsUsed: 0, searches: 0, startedAt: new Date() };
+  try {
+    statsData = await getStats();
+    if (dbConnected) {
+      totalUsers = await User.countDocuments();
+      subscribedUsers = await User.countDocuments({ subscribed: true });
+      const today = new Date().toISOString().split('T')[0];
+      todayUsers = await User.countDocuments({ lastActive: { $gte: new Date(today) } });
+      movieCount = await Movie.countDocuments();
+    }
+    uptime = Math.floor((Date.now() - new Date(statsData.startedAt).getTime()) / (1000 * 60 * 60));
+  } catch (err) { console.error('admin_stats error:', err.message); }
 
   ctx.editMessageText(
-    `📊 *Admin - အသေးစိတ်စာရင်း*\n\n👥 စုစုပေါင်း User: ${totalUsers}\n🔔 စာရင်းသွင်းထားသူ: ${subscribedUsers}\n📅 ယနေ့ Active: ${todayUsers}\n💬 စုစုပေါင်း Message: ${stats.totalMessages}\n⚡ Commands: ${stats.commandsUsed}\n🔍 Searches: ${stats.searches}\n🎬 Movies: ${movieCount} (No Limit)\n⏰ Uptime: ${uptime} နာရီ`,
+    `📊 *Admin - အသေးစိတ်စာရင်း*\n\n👥 စုစုပေါင်း User: ${totalUsers}\n🔔 စာရင်းသွင်းထားသူ: ${subscribedUsers}\n📅 ယနေ့ Active: ${todayUsers}\n💬 စုစုပေါင်း Message: ${statsData.totalMessages}\n⚡ Commands: ${statsData.commandsUsed}\n🔍 Searches: ${statsData.searches}\n🎬 Movies: ${movieCount} (No Limit)\n⏰ Uptime: ${uptime} နာရီ`,
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
@@ -801,16 +880,22 @@ bot.action('admin_users', async (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
   ctx.answerCbQuery();
 
-  const users = await User.find().sort({ lastActive: -1 }).limit(10);
-  const totalUsers = await User.countDocuments();
-
   let text = `👥 *နောက်ဆုံး Active Users (Top 10)*\n\n`;
-  users.forEach((u, i) => {
-    const sub = u.subscribed ? '🔔' : '';
-    const name = u.first_name || 'Unknown';
-    const username = u.username ? `@${u.username}` : '';
-    text += `${i + 1}. ${name} ${username} ${sub}\n`;
-  });
+  let totalUsers = 0;
+  if (dbConnected) {
+    try {
+      const users = await User.find().sort({ lastActive: -1 }).limit(10);
+      totalUsers = await User.countDocuments();
+      users.forEach((u, i) => {
+        const sub = u.subscribed ? '🔔' : '';
+        const name = u.first_name || 'Unknown';
+        const username = u.username ? `@${u.username}` : '';
+        text += `${i + 1}. ${name} ${username} ${sub}\n`;
+      });
+    } catch (err) { console.error('admin_users error:', err.message); text += '⚠️ Data မရနိုင်ပါ\n'; }
+  } else {
+    text += '⚠️ MongoDB မချိတ်ဆက်ထားပါ\n';
+  }
 
   text += `\n👥 စုစုပေါင်း: ${totalUsers} ယောက်`;
 
@@ -969,7 +1054,10 @@ bot.action('admin_listmovies', async (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
   ctx.answerCbQuery();
 
-  const movies = await Movie.find().sort({ addedAt: -1 });
+  let movies = [];
+  if (dbConnected) {
+    try { movies = await Movie.find().sort({ addedAt: -1 }); } catch (err) { console.error('listmovies error:', err.message); }
+  }
 
   if (movies.length === 0) {
     ctx.editMessageText(
@@ -1012,7 +1100,10 @@ bot.action('admin_deletemovie', async (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
   ctx.answerCbQuery();
 
-  const movies = await Movie.find().sort({ addedAt: 1 });
+  let movies = [];
+  if (dbConnected) {
+    try { movies = await Movie.find().sort({ addedAt: 1 }); } catch (err) { console.error('deletemovie list error:', err.message); }
+  }
 
   if (movies.length === 0) {
     ctx.editMessageText(
@@ -1050,9 +1141,14 @@ bot.action('admin_back', async (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
   ctx.answerCbQuery();
 
-  const totalUsers = await User.countDocuments();
-  const subscribedUsers = await User.countDocuments({ subscribed: true });
-  const movieCount = await Movie.countDocuments();
+  let totalUsers = 0, subscribedUsers = 0, movieCount = 0;
+  if (dbConnected) {
+    try {
+      totalUsers = await User.countDocuments();
+      subscribedUsers = await User.countDocuments({ subscribed: true });
+      movieCount = await Movie.countDocuments();
+    } catch (err) { console.error('admin_back error:', err.message); }
+  }
 
   ctx.editMessageText(
     `🛡️ *Admin Panel*\n\n👥 Users: ${totalUsers}\n🔔 Subscribed: ${subscribedUsers}\n🎬 Movies: ${movieCount} (Limit မရှိ)`,
@@ -1094,7 +1190,10 @@ bot.command('broadcast', async (ctx) => {
     return;
   }
 
-  const users = await User.find();
+  let users = [];
+  if (dbConnected) {
+    try { users = await User.find(); } catch (err) { console.error('broadcast find error:', err.message); }
+  }
   let sentCount = 0;
   let failCount = 0;
 
@@ -1109,12 +1208,16 @@ bot.command('broadcast', async (ctx) => {
     }
   }
 
-  await Notification.create({
-    text: message,
-    date: new Date(),
-    sentBy: ctx.from.first_name,
-    type: 'broadcast'
-  });
+  if (dbConnected) {
+    try {
+      await Notification.create({
+        text: message,
+        date: new Date(),
+        sentBy: ctx.from.first_name,
+        type: 'broadcast'
+      });
+    } catch (err) { console.error('notification save error:', err.message); }
+  }
 
   ctx.reply(`📢 Broadcast ပို့ပြီးပါပြီ!\n\n✅ ပို့ရမှု: ${sentCount}\n❌ မပို့နိုင်: ${failCount}`);
 });
@@ -1133,7 +1236,10 @@ bot.command('notify', async (ctx) => {
     return;
   }
 
-  const subscribers = await User.find({ subscribed: true });
+  let subscribers = [];
+  if (dbConnected) {
+    try { subscribers = await User.find({ subscribed: true }); } catch (err) { console.error('notify find error:', err.message); }
+  }
   let sentCount = 0;
   let failCount = 0;
 
@@ -1148,12 +1254,16 @@ bot.command('notify', async (ctx) => {
     }
   }
 
-  await Notification.create({
+  if (dbConnected) {
+    try {
+      await Notification.create({
     text: message,
     date: new Date(),
     sentBy: ctx.from.first_name,
     type: 'notification'
-  });
+      });
+    } catch (err) { console.error('notification save error:', err.message); }
+  }
 
   ctx.reply(`🔔 Notification ပို့ပြီးပါပြီ!\n\n✅ ပို့ရမှု: ${sentCount}\n❌ မပို့နိုင်: ${failCount}`);
 });
@@ -1166,7 +1276,10 @@ bot.command('listmovies', async (ctx) => {
     return;
   }
 
-  const movies = await Movie.find().sort({ addedAt: -1 });
+  let movies = [];
+  if (dbConnected) {
+    try { movies = await Movie.find().sort({ addedAt: -1 }); } catch (err) { console.error('listmovies error:', err.message); }
+  }
 
   if (movies.length === 0) {
     ctx.reply(
@@ -1222,15 +1335,22 @@ bot.command('deletemovie', async (ctx) => {
     return;
   }
 
-  const movies = await Movie.find().sort({ addedAt: 1 });
+  let movies = [];
+  if (dbConnected) {
+    try { movies = await Movie.find().sort({ addedAt: 1 }); } catch (err) { console.error('deletemovie error:', err.message); }
+  }
 
   if (index >= movies.length) {
     ctx.reply(`❌ အမှတ်စဉ် ${index + 1} မရှိပါ။ စုစုပေါင်း ${movies.length} ကားသာ ရှိပါသည်။\n/listmovies နဲ့ စာရင်းကြည့်ပါ`);
     return;
   }
 
-  const deletedMovie = await Movie.findByIdAndDelete(movies[index]._id);
-  const remainingMovies = await Movie.countDocuments();
+  let deletedMovie = null;
+  let remainingMovies = 0;
+  try {
+    deletedMovie = await Movie.findByIdAndDelete(movies[index]._id);
+    remainingMovies = await Movie.countDocuments();
+  } catch (err) { console.error('delete error:', err.message); }
 
   ctx.reply(
     `✅ *ဇတ်ကား ဖျက်ပြီးပါပြီ!*\n\n🎬 ${deletedMovie.title}\n\n📝 ကျန်ရှိသေးသော: ${remainingMovies} ကား`,
@@ -1399,13 +1519,18 @@ bot.command('search', async (ctx) => {
   const queryLower = query.toLowerCase();
 
   // Admin Movies ထဲမှာရှာမယ် (MongoDB)
-  const adminMovieResults = await Movie.find({
-    $or: [
-      { title: { $regex: queryLower, $options: 'i' } },
-      { overview: { $regex: queryLower, $options: 'i' } },
-      { overview_text: { $regex: queryLower, $options: 'i' } }
-    ]
-  }).limit(3);
+  let adminMovieResults = [];
+  if (dbConnected) {
+    try {
+      adminMovieResults = await Movie.find({
+        $or: [
+          { title: { $regex: queryLower, $options: 'i' } },
+          { overview: { $regex: queryLower, $options: 'i' } },
+          { overview_text: { $regex: queryLower, $options: 'i' } }
+        ]
+      }).limit(3);
+    } catch (err) { console.error('search admin movies error:', err.message); }
+  }
 
   // Built-in moviesDB ထဲမှာရှာမယ်
   const movieResults = [];
@@ -1438,7 +1563,8 @@ bot.command('search', async (ctx) => {
 
   // ဘာမှမရှာတွေ့ရင်
   if (movieResults.length === 0 && seriesResults.length === 0 && adminMovieResults.length === 0) {
-    const adminMovieCount = await Movie.countDocuments();
+    let adminMovieCount = 0;
+    if (dbConnected) { try { adminMovieCount = await Movie.countDocuments(); } catch(e) {} }
     let hint = '';
     if (adminMovieCount === 0) {
       hint = '\n\n💡 Admin က ဇတ်ကားတင်ထားခြင်းမရှိသေးပါ။ ဇတ်ကားတင်ရန် /admin ကိုသုံးပါ။';
@@ -1517,13 +1643,18 @@ bot.on('text', async (ctx, next) => {
     const queryLower = query.toLowerCase();
 
     // Admin Movies ထဲမှာရှာမယ် (MongoDB)
-    const adminMovieResults = await Movie.find({
-      $or: [
-        { title: { $regex: queryLower, $options: 'i' } },
-        { overview: { $regex: queryLower, $options: 'i' } },
-        { overview_text: { $regex: queryLower, $options: 'i' } }
-      ]
-    }).limit(3);
+    let adminMovieResults = [];
+    if (dbConnected) {
+      try {
+        adminMovieResults = await Movie.find({
+          $or: [
+            { title: { $regex: queryLower, $options: 'i' } },
+            { overview: { $regex: queryLower, $options: 'i' } },
+            { overview_text: { $regex: queryLower, $options: 'i' } }
+          ]
+        }).limit(3);
+      } catch (err) { console.error('text search admin movies error:', err.message); }
+    }
 
     // Built-in moviesDB ထဲမှာရှာမယ်
     const movieResults = [];
@@ -1554,7 +1685,8 @@ bot.on('text', async (ctx, next) => {
 
     // ဘာမှမရှာတွေ့ရင်
     if (movieResults.length === 0 && seriesResults.length === 0 && adminMovieResults.length === 0) {
-      const adminMovieCount = await Movie.countDocuments();
+      let adminMovieCount = 0;
+    if (dbConnected) { try { adminMovieCount = await Movie.countDocuments(); } catch(e) {} }
       let hint = '';
       if (adminMovieCount === 0) {
         hint = '\n\n💡 Admin က ဇတ်ကားတင်ထားခြင်းမရှိသေးပါ။ ဇတ်ကားတင်ရန် /admin ကိုသုံးပါ။';
@@ -1750,7 +1882,8 @@ bot.action('search', async (ctx) => {
   ctx.answerCbQuery();
   const userId = ctx.from.id.toString();
   searchState[userId] = true;
-  const adminMovieCount = await Movie.countDocuments();
+  let adminMovieCount = 0;
+  if (dbConnected) { try { adminMovieCount = await Movie.countDocuments(); } catch(e) {} }
   let infoText = '';
   if (adminMovieCount > 0) {
     infoText = `\n\n🎬 လက်ရှိတင်ထားသော ဇတ်ကား: ${adminMovieCount} ကား`;
@@ -1885,9 +2018,14 @@ Kumastream သည် ရုပ်ရှင်များနှင့် TV Show
 // 🔙 ပင်မမီနူး
 bot.action('back_menu', async (ctx) => {
   ctx.answerCbQuery();
-  const userId = ctx.from.id.toString();
-  const user = await User.findOne({ userId });
-  const subStatus = user && user.subscribed ? ' ✅' : '';
+  let subStatus = '';
+  if (dbConnected) {
+    try {
+      const userId = ctx.from.id.toString();
+      const user = await User.findOne({ userId });
+      subStatus = user && user.subscribed ? ' ✅' : '';
+    } catch (err) { console.error('back_menu error:', err.message); }
+  }
 
   ctx.editMessageText(
     `🎬 *Kumastream မှ ကြိုဆိုပါတယ်!*\n\nသင်၏ ရုပ်ရှင်နှင့် TV Shows ကြည့်ရှုရေး Bot ပါ။${subStatus}\n\nဘာလုပ်ချင်ပါသလဲ?`,
@@ -1952,15 +2090,26 @@ bot.on('message', (ctx) => {
 // ============================================
 // Bot Start
 // ============================================
-bot.launch().then(async () => {
-  const movieCount = await Movie.countDocuments();
-  console.log('✅ Kumastream Bot Level 4 (MongoDB) အသက်ဝင်ပါပြီး!');
-  console.log(`👤 Admin IDs: ${ADMIN_IDS.length > 0 ? ADMIN_IDS.join(', ') : 'မထည့်ရသေးပါ - ADMIN_IDS environment variable ထည့်ပါ'}`);
-  console.log(`🎬 Movies in DB: ${movieCount} (No Limit)`);
-  console.log(`📊 Storage: MongoDB Atlas - Data persists across restarts!`);
-}).catch((err) => {
-  console.error('Bot စတင်မှု မအောင်မြင်ပါ:', err);
-});
+// ============================================
+// BOT STARTUP - MongoDB ချိတ်ဆက်ပြီးမှ Bot စတင်မယ်
+// ============================================
+async function startBot() {
+  // MongoDB ချိတ်ဆက်မယ်
+  await connectDB();
+
+  // Bot ကို စတင်မယ်
+  bot.launch().then(async () => {
+    const movieCount = dbConnected ? await Movie.countDocuments() : 0;
+    console.log('✅ Kumastream Bot Level 4 (MongoDB) အသက်ဝင်ပါပြီး!');
+    console.log(`👤 Admin IDs: ${ADMIN_IDS.length > 0 ? ADMIN_IDS.join(', ') : 'မထည့်ရသေးပါ - ADMIN_IDS environment variable ထည့်ပါ'}`);
+    console.log(`🎬 Movies in DB: ${movieCount} (No Limit)`);
+    console.log(`📊 Storage: ${dbConnected ? 'MongoDB Atlas - Data persists across restarts!' : '⚠️ MongoDB မချိတ်ဆက်ထား - Data မသိမ်းဆည်းနိုင်ပါ'}`);
+  }).catch((err) => {
+    console.error('Bot စတင်မှု မအောင်မြင်ပါ:', err);
+  });
+}
+
+startBot();
 
 // Graceful shutdown
 process.once('SIGINT', () => bot.stop('SIGINT'));
