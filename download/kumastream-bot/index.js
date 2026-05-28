@@ -252,7 +252,8 @@ async function connectDB() {
   if (!MONGODB_URI) {
     console.warn('⚠️ MONGODB_URI မထည့်ထားပါ! Bot က MongoDB မပါဘဲ လည်ပါမယ်။');
     console.warn('⚠️ User registration, Movie storage တွေ မသိမ်းဆည်းနိုင်ပါ။');
-    return;
+    console.warn('⚠️ Railway → Settings → Variables မှာ MONGODB_URI ထည့်ပါ!');
+    return false;
   }
 
   console.log('🗄️ MongoDB Atlas ချိတ်ဆက်နေပါသည်...');
@@ -267,6 +268,7 @@ async function connectDB() {
     if (!connectURI.includes('mongodb.net/kumastream')) {
       connectURI = connectURI.replace('mongodb.net/', 'mongodb.net/kumastream?');
     }
+    console.log(`📦 Database name "kumastream" ကို auto-add လုပ်ပါတယ်`);
   }
   console.log(`🔗 Connecting to: ${connectURI.replace(/:([^@]+)@/, ':****@')}`);
 
@@ -287,13 +289,27 @@ async function connectDB() {
     const movieCount = await Movie.countDocuments();
     const stats = await getStats();
     console.log(`📊 Data Status:`);
+    console.log(`   - Database: ${mongoose.connection.name}`);
+    console.log(`   - Host: ${mongoose.connection.host}`);
     console.log(`   - Users: ${userCount}`);
     console.log(`   - Movies: ${movieCount}`);
     console.log(`   - Searches: ${stats.searches || 0}`);
+
+    // ဇတ်ကား ရှိရင် နောက်ဆုံး 5 ကား ပြပါ
+    if (movieCount > 0) {
+      const recentMovies = await Movie.find().sort({ addedAt: -1 }).limit(5);
+      console.log(`🎬 Recent movies in DB:`);
+      recentMovies.forEach((m, i) => console.log(`   ${i + 1}. "${m.title}" (video: ${m.video_file_id ? 'YES' : 'NO'})`));
+    } else {
+      console.log('⚠️ Database မှာ ဇတ်ကား တစ်ကားမှ မရှိပါ!');
+    }
+
+    return true;
   } catch (err) {
     console.error('❌ MongoDB ချိတ်ဆက်မရ:', err.message);
     console.warn('⚠️ Bot က MongoDB မပါဘဲ ဆက်လည်ပါမယ်...');
     console.warn('⚠️ ဖြေရှင်းနည်း: MongoDB Atlas → Network Access → 0.0.0.0/0 ကို Add ပါ');
+    return false;
   }
 }
 
@@ -1778,6 +1794,71 @@ bot.command('canceladdmovie', (ctx) => {
   }
 });
 
+// /dbstatus command - MongoDB ချိတ်ဆက်မှု အသေးစိတ်စစ်ဆေးရန်
+bot.command('dbstatus', async (ctx) => {
+  if (!isAdmin(ctx)) {
+    ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
+    return;
+  }
+
+  const readyState = mongoose.connection.readyState;
+  const stateNames = { 0: '❌ Disconnected', 1: '✅ Connected', 2: '🔄 Connecting...', 3: '⚠️ Disconnecting' };
+
+  let movieCount = 0;
+  let userCount = 0;
+  let dbHost = 'N/A';
+  let dbName = 'N/A';
+
+  if (dbConnected && readyState === 1) {
+    try {
+      movieCount = await Movie.countDocuments();
+      userCount = await User.countDocuments();
+      dbHost = mongoose.connection.host || 'N/A';
+      dbName = mongoose.connection.name || 'N/A';
+    } catch (err) {
+      console.error('dbstatus count error:', err.message);
+    }
+  }
+
+  // List last 5 movies in DB
+  let lastMovies = '';
+  if (dbConnected && readyState === 1) {
+    try {
+      const recent = await Movie.find().sort({ addedAt: -1 }).limit(5);
+      if (recent.length > 0) {
+        lastMovies = '\n\n🎬 *နောက်ဆုံး ဇတ်ကားများ:*\n' + recent.map((m, i) => `${i + 1}. ${m.title}`).join('\n');
+      } else {
+        lastMovies = '\n\n⚠️ Database မှာ ဇတ်ကား တစ်ကားမှ မရှိပါ!';
+      }
+    } catch (err) {
+      lastMovies = '\n\n❌ ဇတ်ကားစာရင်း မယူနိုင်ပါ';
+    }
+  }
+
+  const maskedURI = MONGODB_URI ? MONGODB_URI.replace(/:([^@]+)@/, ':****@') : '❌ မထည့်ထားပါ!';
+
+  const statusText = `🔍 *MongoDB Database Status*\n\n` +
+    `🔌 Connection: ${stateNames[readyState]}\n` +
+    `📊 dbConnected flag: ${dbConnected ? '✅ true' : '❌ false'}\n` +
+    `🗄️ Database: ${dbName}\n` +
+    `🌐 Host: ${dbHost}\n` +
+    `🔗 URI: ${maskedURI}\n\n` +
+    `👥 Users: ${userCount}\n` +
+    `🎬 Movies: ${movieCount}${lastMovies}\n\n` +
+    `⚠️ MONGODB_URI ${MONGODB_URI ? '✅ ရှိပါတယ်' : '❌ မရှိပါ! Railway → Variables မှာ ထည့်ပါ!'}`;
+
+  const buttons = [];
+  if (!dbConnected) {
+    buttons.push([Markup.button.callback('🔄 Reconnect MongoDB', 'admin_reconnect_db')]);
+  }
+  buttons.push([Markup.button.callback('🔙 Admin Panel', 'admin_back')]);
+
+  ctx.reply(statusText, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard(buttons)
+  });
+});
+
 // /addmovie command - 3 Step Flow
 bot.command('addmovie', (ctx) => {
   if (!isAdmin(ctx)) {
@@ -2540,22 +2621,37 @@ bot.catch((err, ctx) => {
     await bot.launch();
     console.log('✅ Kumastream Bot အသက်ဝင်ပါပြီး!');
     console.log(`👤 Admin IDs: ${ADMIN_IDS.length > 0 ? ADMIN_IDS.join(', ') : 'မထည့်ရသေးပါ - ADMIN_IDS environment variable ထည့်ပါ'}`);
-    console.log(`📊 Storage: ${dbConnected ? 'MongoDB Atlas ✅' : '⏳ MongoDB ချိတ်ဆက်နေဆဲ...'}`);
   } catch (err) {
     console.error('❌ Bot စတင်မှု မအောင်မြင်ပါ:', err.message);
     process.exit(1);
   }
 
-  // MongoDB ကို background မှာ ချိတ်ဆက်မယ် (Bot က နောက်မကျနေအောင်)
-  connectDB().then(async () => {
-    const movieCount = dbConnected ? await Movie.countDocuments() : 0;
-    console.log(`🎬 Movies in DB: ${movieCount} (No Limit)`);
-    if (dbConnected) {
+  // MongoDB ကို background မှာ ချိတ်ဆက်မယ် - မအောင်မြင်ရင် 3 ကြိမ်ထပ်စမ်းမယ်
+  let retries = 3;
+  for (let i = 1; i <= retries; i++) {
+    console.log(`🔄 MongoDB connection attempt ${i}/${retries}...`);
+    const connected = await connectDB();
+    if (connected) {
+      console.log(`🎬 Movies in DB: ${dbConnected ? await Movie.countDocuments() : 0} (No Limit)`);
       console.log('📊 Storage: MongoDB Atlas - Data persists across restarts! ✅');
+      break;
     }
-  }).catch((err) => {
-    console.error('❌ MongoDB background connect error:', err.message);
-  });
+    if (i < retries) {
+      console.log(`⏳ ${10 * i} စက္ကန့် စောင့်ပြီး ပြန်စမ်းမယ်...`);
+      await new Promise(resolve => setTimeout(resolve, 10000 * i));
+    } else {
+      console.error('❌ MongoDB 3 ကြိမ် ကြိုးစားပေမယ့် မအောင်မြင်ပါ!');
+      console.warn('💡 /dbstatus နဲ့ စစ်ဆေးပါ။ Railway Variables မှာ MONGODB_URI ရှိမရှိ စစ်ပါ။');
+    }
+  }
+
+  // Periodic DB health check - ခန ၃၀ မိနစ်တစ်ကြိမ် စစ်ဆေးမယ်
+  setInterval(async () => {
+    if (!dbConnected && MONGODB_URI) {
+      console.log('🔄 Periodic check: MongoDB ချိတ်ဆက်မရ → ပြန်ချိတ်ဆက်စမ်းမယ်...');
+      await connectDB();
+    }
+  }, 30 * 60 * 1000); // 30 မိနစ်
 }
 
 startBot();
