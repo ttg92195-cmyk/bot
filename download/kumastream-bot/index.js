@@ -234,6 +234,18 @@ function escapeHtml(text) {
 }
 
 // ============================================
+// HELPER: Escape Regex special characters
+// Search query ထဲမှာ ( ) [ ] { } . * + ? ^ $ | \ စတဲ့
+// regex special chars တွေကို escape လုပ်ပေးမယ်
+// ဥပမာ: "Appleseed (2007)" → "Appleseed \(2007\)"
+// ဒီလိုလုပ်မှ MongoDB $regex မှာ မှန်ကန်စွာ ရှာတွေ့မယ်
+// ============================================
+function escapeRegex(str) {
+  if (!str) return '';
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ============================================
 // MONGODB CONNECT + STARTUP
 // ============================================
 async function connectDB() {
@@ -1925,6 +1937,7 @@ bot.command('search', async (ctx) => {
   console.log(`🔍 Search query: "${query}" from user ${ctx.from.id}`);
 
   const queryLower = query.toLowerCase();
+  const queryEscaped = escapeRegex(queryLower); // Regex special chars တွေကို escape လုပ်မယ်
 
   // Admin Movies ထဲမှာရှာမယ် (MongoDB)
   let adminMovieResults = [];
@@ -1932,9 +1945,9 @@ bot.command('search', async (ctx) => {
     try {
       adminMovieResults = await Movie.find({
         $or: [
-          { title: { $regex: queryLower, $options: 'i' } },
-          { overview: { $regex: queryLower, $options: 'i' } },
-          { overview_text: { $regex: queryLower, $options: 'i' } }
+          { title: { $regex: queryEscaped, $options: 'i' } },
+          { overview: { $regex: queryEscaped, $options: 'i' } },
+          { overview_text: { $regex: queryEscaped, $options: 'i' } }
         ]
       }).limit(3);
     } catch (err) { console.error('search admin movies error:', err.message); }
@@ -2049,6 +2062,7 @@ bot.on('text', async (ctx, next) => {
     console.log(`🔍 Text search: "${query}" from user ${ctx.from.id}`);
 
     const queryLower = query.toLowerCase();
+    const queryEscaped = escapeRegex(queryLower); // Regex special chars တွေကို escape လုပ်မယ်
 
     // Admin Movies ထဲမှာရှာမယ် (MongoDB)
     let adminMovieResults = [];
@@ -2056,9 +2070,9 @@ bot.on('text', async (ctx, next) => {
       try {
         adminMovieResults = await Movie.find({
           $or: [
-            { title: { $regex: queryLower, $options: 'i' } },
-            { overview: { $regex: queryLower, $options: 'i' } },
-            { overview_text: { $regex: queryLower, $options: 'i' } }
+            { title: { $regex: queryEscaped, $options: 'i' } },
+            { overview: { $regex: queryEscaped, $options: 'i' } },
+            { overview_text: { $regex: queryEscaped, $options: 'i' } }
           ]
         }).limit(3);
       } catch (err) { console.error('text search admin movies error:', err.message); }
