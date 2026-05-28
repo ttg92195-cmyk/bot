@@ -1,10 +1,13 @@
 // ============================================
-// Kumastream Telegram Bot - Level 3 (FINAL v2)
+// Kumastream Telegram Bot - Level 3 (FINAL v3)
 // Framework: Node.js + Telegraf
 // Features: Menu, Categories, Trending, Search,
 //           FAQ, Download, Subscription, Admin,
 //           User Stats, Broadcast, Notification
-// Fix: HTML parse_mode for search, 3-step Add Movie
+// Fix v3: Display separated into 3 messages
+//   1. Poster + Movie Name (caption, 1024 limit)
+//   2. Overview (separate message, 4096 limit)
+//   3. Video (separate message)
 // ============================================
 
 const { Telegraf, Markup } = require('telegraf');
@@ -131,6 +134,14 @@ function escapeHtml(text) {
 // Load data on startup
 loadData();
 
+// Startup logging - data status ပြမယ်
+console.log(`🚀 Kumastream Bot စတင်ပါပြီ!`);
+console.log(`📊 Data Status:`);
+console.log(`   - Users: ${Object.keys(botData.users || {}).length}`);
+console.log(`   - Movies: ${(botData.adminMovies || []).length}`);
+console.log(`   - Searches: ${botData.stats?.searches || 0}`);
+console.log(`⚠️ Note: Railway ephemeral filesystem ကြောင့် container restart လုပ်ရင် botdata.json ပျောက်သွားနိုင်ပါတယ်`);
+
 // ============================================
 // MOVIES DATABASE
 // ============================================
@@ -221,19 +232,23 @@ function formatList(items, emoji = '🎥') {
 
 // ============================================
 // HELPER: Display Admin Movie search result
-// HTML parse_mode သုံးတယ် - Markdown error မဖြစ်တော့ဘူး
+// ပြသမှု အဆင့် ၃ ဆင့်:
+//   1. Poster + Movie Name (Photo caption - 1024 char limit)
+//   2. Overview (Separate text message - 4096 char limit)
+//   3. Video (Separate video message)
+// ဒီလိုခွဲမှ overview ရှည်ရင်ပြည့်စုံပြနိုင်တယ်
 // ============================================
 async function displayAdminMovie(ctx, movie) {
-  const displayOverview = movie.overview_text || movie.overview || 'ဖော်ပြချက် မရှိပါ';
+  const displayOverview = movie.overview_text || movie.overview || '';
   const safeTitle = escapeHtml(movie.title);
   const safeOverview = escapeHtml(displayOverview);
 
   try {
-    // 1. Poster + Overview ပြမယ်
+    // ===== 1. Poster + Movie Name =====
+    // Caption မှာ Movie Name ပဲထည့်မယ် (1024 limit မကျော်ဘဲ)
     if (movie.poster_file_id) {
-      // Telegram photo caption limit = 1024 chars
-      const caption = `🎬 <b>${safeTitle}</b>\n\n📝 <b>Overview:</b>\n${safeOverview}\n\n📂 Kumastream မှ ရရှိနိုင်ပါသည်`;
-      // Caption က 1024 chars ထက်ကြီးရင် ဖြတ်ပါ
+      const caption = `🎬 <b>${safeTitle}</b>\n\n📂 Kumastream မှ ရရှိနိုင်ပါသည်`;
+      // Caption က 1024 chars ထက်ကြီးရင် ဖြတ်ပါ (မကြီးသင့်ပေမဲ့ safety)
       const safeCaption = caption.length > 1000 ? caption.substring(0, 1000) + '...' : caption;
 
       await ctx.replyWithPhoto(movie.poster_file_id, {
@@ -244,8 +259,9 @@ async function displayAdminMovie(ctx, movie) {
         ])
       });
     } else {
+      // Poster မရှိရင် စာသားနဲ့ပြမယ်
       await ctx.reply(
-        `🎬 <b>${safeTitle}</b>\n\n📝 <b>Overview:</b>\n${safeOverview}\n\n📂 Kumastream မှ ရရှိနိုင်ပါသည်`,
+        `🎬 <b>${safeTitle}</b>\n\n📂 Kumastream မှ ရရှိနိုင်ပါသည်`,
         {
           parse_mode: 'HTML',
           ...Markup.inlineKeyboard([
@@ -255,10 +271,23 @@ async function displayAdminMovie(ctx, movie) {
       );
     }
 
-    // 2. Video ပြမယ်
+    // ===== 2. Overview (Separate Message - 4096 char limit) =====
+    // Overview ကို သီးသန့် message နဲ့ပြမယ် - စာရှည်ရင်လည်း ပြည့်စုံတယ်
+    if (safeOverview) {
+      const overviewText = `📝 <b>Overview:</b>\n\n${safeOverview}`;
+      // Regular message limit = 4096 chars
+      const safeOverviewText = overviewText.length > 4000 ? overviewText.substring(0, 4000) + '...' : overviewText;
+
+      await ctx.reply(safeOverviewText, {
+        parse_mode: 'HTML'
+      });
+    }
+
+    // ===== 3. Video (Separate Message) =====
     if (movie.video_file_id) {
       await ctx.replyWithVideo(movie.video_file_id, {
-        caption: `🎬 ${movie.title}`,
+        caption: `🎬 ${safeTitle}`,
+        parse_mode: 'HTML',
       });
     }
   } catch (err) {
@@ -266,11 +295,14 @@ async function displayAdminMovie(ctx, movie) {
     // Fallback: plain text (no formatting)
     try {
       await ctx.reply(
-        `🎬 ${movie.title}\n\n📝 ${displayOverview}\n\n📂 Kumastream မှ ရရှိနိုင်ပါသည်`,
+        `🎬 ${movie.title}\n\n📂 Kumastream မှ ရရှိနိုင်ပါသည်`,
         Markup.inlineKeyboard([
           [Markup.button.callback('🔙 ပင်မမီနူး', 'back_menu')]
         ])
       );
+      if (displayOverview) {
+        await ctx.reply(`📝 Overview:\n\n${displayOverview}`);
+      }
       if (movie.video_file_id) {
         await ctx.replyWithVideo(movie.video_file_id, {
           caption: `🎬 ${movie.title}`,
