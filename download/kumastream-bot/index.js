@@ -102,6 +102,7 @@ const Notification = mongoose.model('Notification', notificationSchema);
 // ============================================
 const MONGODB_URI = process.env.MONGODB_URI;
 let dbConnected = false;
+let lastDBError = ''; // ချိတ်ဆက်မှု အမှားအကြောင်းရင်း သိမ်းမယ်
 
 // ============================================
 // MONGOOSE CONNECTION EVENT LISTENERS
@@ -109,6 +110,7 @@ let dbConnected = false;
 // ============================================
 mongoose.connection.on('connected', () => {
   dbConnected = true;
+  lastDBError = '';
   console.log('✅ MongoDB Connection: Active');
 });
 
@@ -119,6 +121,7 @@ mongoose.connection.on('disconnected', () => {
 
 mongoose.connection.on('error', (err) => {
   dbConnected = false;
+  lastDBError = err.message;
   console.error('❌ MongoDB Connection Error:', err.message);
 });
 
@@ -306,6 +309,7 @@ async function connectDB() {
 
     return true;
   } catch (err) {
+    lastDBError = err.message;
     console.error('❌ MongoDB ချိတ်ဆက်မရ:', err.message);
     console.warn('⚠️ Bot က MongoDB မပါဘဲ ဆက်လည်ပါမယ်...');
     console.warn('⚠️ ဖြေရှင်းနည်း: MongoDB Atlas → Network Access → 0.0.0.0/0 ကို Add ပါ');
@@ -1138,11 +1142,16 @@ bot.action('admin_dbstatus', async (ctx) => {
     statusText += `🎬 Movies: ${movieCount}\n`;
     statusText += `👥 Users: ${userCount}\n`;
 
+    if (!dbConnected && lastDBError) {
+      statusText += `\n❌ <b>Error:</b> <code>${escapeHtml(lastDBError)}</code>\n`;
+    }
+
     if (!dbConnected) {
       statusText += `\n⚠️ <b>MongoDB ချိတ်ဆက်မရပါ!</b>\n\nဖြေရှင်းနည်း:\n`;
-      statusText += `1. MongoDB Atlas → Network Access → 0.0.0.0/0\n`;
-      statusText += `2. Railway → <code>MONGODB_URI</code> စစ်ပါ\n`;
-      statusText += `3. MongoDB Atlas → User/Password စစ်ပါ`;
+      statusText += `1. MongoDB Atlas → Cluster Pause ဖြစ်နေလား စစ်ပါ\n`;
+      statusText += `2. Network Access → 0.0.0.0/0 ရှိမရှိ စစ်ပါ\n`;
+      statusText += `3. Database Access → User/Password စစ်ပါ\n`;
+      statusText += `4. Railway → <code>MONGODB_URI</code> မှန်မှန် စစ်ပါ`;
     }
 
     const buttons = [];
@@ -1804,7 +1813,7 @@ bot.command('dbstatus', async (ctx) => {
   // HTML parse_mode သုံးမယ် - Markdown က URI ထဲက :// နဲ့ _ တွေကို မှားယွင်း parse လုပ်လို့
   const maskedURI = MONGODB_URI ? MONGODB_URI.replace(/:([^@]+)@/, ':****@') : '❌ မထည့်ထားပါ!';
 
-  const statusText = `🔍 <b>MongoDB Database Status</b>\n\n` +
+  let statusText = `🔍 <b>MongoDB Database Status</b>\n\n` +
     `🔌 Connection: ${stateNames[readyState]}\n` +
     `📊 dbConnected flag: ${dbConnected ? '✅ true' : '❌ false'}\n` +
     `🗄️ Database: ${escapeHtml(dbName)}\n` +
@@ -1813,6 +1822,16 @@ bot.command('dbstatus', async (ctx) => {
     `👥 Users: ${userCount}\n` +
     `🎬 Movies: ${movieCount}${lastMovies}\n\n` +
     `⚠️ <code>MONGODB_URI</code> ${MONGODB_URI ? '✅ ရှိပါတယ်' : '❌ မရှိပါ! Railway → Variables မှာ ထည့်ပါ!'}`;
+
+  // ချိတ်ဆက်မှု အမှား ရှိရင် အကြောင်းရင်း ပြပါ
+  if (!dbConnected && lastDBError) {
+    statusText += `\n\n❌ <b>ချိတ်ဆက်မှု အမှား:</b>\n<code>${escapeHtml(lastDBError)}</code>\n\n💡 အထက်ပါ error ကို စစ်ဆေးပါ`;
+  }
+
+  // ချိတ်ဆက်မရရင် ဖြေရှင်းနည်း ပြပါ
+  if (!dbConnected) {
+    statusText += `\n\n📋 <b>ဖြေရှင်းနည်း:</b>\n1. MongoDB Atlas → Cluster ပြန်စမလား စစ်ပါ (Pause ဖြစ်နေခဲ့ရင် Resume နိုပ်ပါ)\n2. MongoDB Atlas → Network Access → 0.0.0.0/0 ရှိမရှိ စစ်ပါ\n3. MongoDB Atlas → Database Access → User/Password မှန်မှန် စစ်ပါ\n4. Railway → Variables → <code>MONGODB_URI</code> မှန်မှန် စစ်ပါ`;
+  }
 
   const buttons = [];
   if (!dbConnected) {
