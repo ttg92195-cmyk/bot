@@ -569,8 +569,10 @@ bot.command('admin', (ctx) => {
   const totalUsers = Object.keys(botData.users).length;
   const subscribedUsers = Object.values(botData.users).filter(u => u.subscribed).length;
 
+  const movieCount = (botData.adminMovies || []).length;
+
   ctx.reply(
-    `🛡️ *Admin Panel*\n\n👥 Users: ${totalUsers}\n🔔 Subscribed: ${subscribedUsers}`,
+    `🛡️ *Admin Panel*\n\n👥 Users: ${totalUsers}\n🔔 Subscribed: ${subscribedUsers}\n🎬 Movies: ${movieCount}`,
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
@@ -584,7 +586,11 @@ bot.command('admin', (ctx) => {
         ],
         [
           Markup.button.callback('🎬 Add Movie', 'admin_addmovie'),
-          Markup.button.callback('📺 Add Series', 'admin_addseries')
+          Markup.button.callback('📂 Movie List', 'admin_listmovies')
+        ],
+        [
+          Markup.button.callback('📺 Add Series', 'admin_addseries'),
+          Markup.button.callback('🗑️ Delete Movie', 'admin_deletemovie')
         ]
       ])
     }
@@ -761,6 +767,86 @@ bot.action('admin_addseries', (ctx) => {
   );
 });
 
+// 📂 Movie List (Admin Panel Button)
+bot.action('admin_listmovies', async (ctx) => {
+  if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
+  ctx.answerCbQuery();
+
+  const movies = botData.adminMovies || [];
+
+  if (movies.length === 0) {
+    ctx.editMessageText(
+      '📂 *တင်ထားသော ဇတ်ကားများ မရှိသေးပါ*\n\n🎬 Add Movie နှိပ်ပြီး ဇတ်ကားအသစ်တင်ပါ',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🎬 Add Movie', 'admin_addmovie')],
+          [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+        ])
+      }
+    );
+    return;
+  }
+
+  let listText = `📂 *တင်ထားသော ဇတ်ကားများ (${movies.length} ကား)*\n\n`;
+
+  movies.forEach((movie, i) => {
+    const hasPoster = movie.poster_file_id ? '🖼️' : '❌';
+    const hasVideo = movie.video_file_id ? '🎬' : '⏭️';
+    const addedDate = movie.addedAt ? new Date(movie.addedAt).toLocaleDateString() : '';
+    listText += `${i + 1}. *${movie.title}*\n   ${hasPoster} Poster | 📝 Overview | ${hasVideo} Video | 📅 ${addedDate}\n`;
+  });
+
+  listText += '\n💡 ဖျက်ချင်ရင်: /deletemovie အမှတ်စဉ်';
+
+  ctx.editMessageText(listText, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('🎬 Add Movie', 'admin_addmovie')],
+      [Markup.button.callback('🗑️ Delete Movie', 'admin_deletemovie')],
+      [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+    ])
+  });
+});
+
+// 🗑️ Delete Movie (Admin Panel Button)
+bot.action('admin_deletemovie', (ctx) => {
+  if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
+  ctx.answerCbQuery();
+
+  const movies = botData.adminMovies || [];
+
+  if (movies.length === 0) {
+    ctx.editMessageText(
+      '📂 *ဖျက်ရန် ဇတ်ကား မရှိပါ*\n\nဇတ်ကားအသစ်တင်ရန် Add Movie နှိပ်ပါ',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🎬 Add Movie', 'admin_addmovie')],
+          [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+        ])
+      }
+    );
+    return;
+  }
+
+  let listText = `🗑️ *ဖျက်ရန် ဇတ်ကားရွေးချယ်ပါ*\n\nဇတ်ကားစာရင်း:\n\n`;
+
+  movies.forEach((movie, i) => {
+    listText += `${i + 1}. ${movie.title}\n`;
+  });
+
+  listText += '\nဖျက်ချင်ရင် အောက်ပါပုံစံဖြင့်ရိုက်ပါ:\n`/deletemovie အမှတ်စဉ်`';
+
+  ctx.editMessageText(listText, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('📂 Movie List', 'admin_listmovies')],
+      [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+    ])
+  });
+});
+
 // Admin Back
 bot.action('admin_back', (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
@@ -768,9 +854,10 @@ bot.action('admin_back', (ctx) => {
 
   const totalUsers = Object.keys(botData.users).length;
   const subscribedUsers = Object.values(botData.users).filter(u => u.subscribed).length;
+  const movieCount = (botData.adminMovies || []).length;
 
   ctx.editMessageText(
-    `🛡️ *Admin Panel*\n\n👥 Users: ${totalUsers}\n🔔 Subscribed: ${subscribedUsers}`,
+    `🛡️ *Admin Panel*\n\n👥 Users: ${totalUsers}\n🔔 Subscribed: ${subscribedUsers}\n🎬 Movies: ${movieCount}`,
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
@@ -784,7 +871,11 @@ bot.action('admin_back', (ctx) => {
         ],
         [
           Markup.button.callback('🎬 Add Movie', 'admin_addmovie'),
-          Markup.button.callback('📺 Add Series', 'admin_addseries')
+          Markup.button.callback('📂 Movie List', 'admin_listmovies')
+        ],
+        [
+          Markup.button.callback('📺 Add Series', 'admin_addseries'),
+          Markup.button.callback('🗑️ Delete Movie', 'admin_deletemovie')
         ]
       ])
     }
@@ -867,6 +958,83 @@ bot.command('notify', (ctx) => {
   saveData();
 
   ctx.reply(`🔔 Notification ပို့ပြီးပါပြီ!\n\n✅ ပို့ရမှု: ${sentCount}\n❌ မပို့နိုင်: ${failCount}`);
+});
+
+// /listmovies command - Admin တင်ထားတဲ့ ဇတ်ကားတွေ ကြည့်ရန်
+bot.command('listmovies', async (ctx) => {
+  if (!isAdmin(ctx)) {
+    ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
+    return;
+  }
+
+  const movies = botData.adminMovies || [];
+
+  if (movies.length === 0) {
+    ctx.reply(
+      '📂 *တင်ထားသော ဇတ်ကားများ မရှိသေးပါ*\n\n/addmovie ဒါမှမဟုတ် Admin Panel မှာ Add Movie နှိပ်ပြီး ဇတ်ကားအသစ်တင်ပါ',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🎬 Add Movie', 'admin_addmovie')],
+          [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+        ])
+      }
+    );
+    return;
+  }
+
+  let listText = `📂 *တင်ထားသော ဇတ်ကားများ (${movies.length} ကား)*\n\n`;
+
+  movies.forEach((movie, i) => {
+    const hasPoster = movie.poster_file_id ? '🖼️' : '❌';
+    const hasVideo = movie.video_file_id ? '🎬' : '⏭️';
+    const addedDate = movie.addedAt ? new Date(movie.addedAt).toLocaleDateString() : '';
+    listText += `${i + 1}. *${movie.title}*\n   ${hasPoster} Poster | 📝 Overview | ${hasVideo} Video | 📅 ${addedDate}\n`;
+  });
+
+  listText += '\n💡 ဖျက်ချင်ရင်: /deletemovie အမှတ်စဉ်';
+
+  ctx.reply(listText, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('🎬 Add Movie', 'admin_addmovie')],
+      [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+    ])
+  });
+});
+
+// /deletemovie command - Admin ဇတ်ကားဖျက်ရန်
+bot.command('deletemovie', (ctx) => {
+  if (!isAdmin(ctx)) {
+    ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
+    return;
+  }
+
+  const args = ctx.message.text.replace('/deletemovie', '').trim();
+  const index = parseInt(args) - 1;
+
+  if (isNaN(index) || index < 0) {
+    ctx.reply(
+      '❌ *ဇတ်ကားဖျက်ရန် အမှတ်စဉ်ထည့်ပါ*\n\nဥပမာ:\n`/deletemovie 1`\n\nဇတ်ကားစာရင်းကြည့်ရန်: /listmovies',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  const movies = botData.adminMovies || [];
+
+  if (index >= movies.length) {
+    ctx.reply(`❌ အမှတ်စဉ် ${index + 1} မရှိပါ။ စုစုပေါင်း ${movies.length} ကားသာ ရှိပါသည်။\n/listmovies နဲ့ စာရင်းကြည့်ပါ`);
+    return;
+  }
+
+  const deletedMovie = movies.splice(index, 1)[0];
+  saveData();
+
+  ctx.reply(
+    `✅ *ဇတ်ကား ဖျက်ပြီးပါပြီ!*\n\n🎬 ${deletedMovie.title}\n\n📝 ကျန်ရှိသေးသော: ${movies.length} ကား`,
+    { parse_mode: 'Markdown' }
+  );
 });
 
 // /addmovie command - Step 1 ကိုစမယ်
@@ -1058,20 +1226,34 @@ bot.command('search', async (ctx) => {
   // Admin Movie ရှာတွေ့ရင် - Poster + Overview + Video ပြမယ်
   if (adminMovieResults.length > 0) {
     for (const movie of adminMovieResults.slice(0, 3)) {
-      // 1. Poster ပြမယ်
+      // Overview text ကို သပ်ရပ်စွာ format လုပ်မယ်
+      const displayOverview = movie.overview_text || movie.overview || 'ဖော်ပြချက် မရှိပါ';
+
+      // 1. Poster + Overview ပြမယ်
       if (movie.poster_file_id) {
         await ctx.replyWithPhoto(movie.poster_file_id, {
-          caption: `🎬 *${movie.title}*\n\n📝 *Overview:*\n${movie.overview}`,
-          parse_mode: 'Markdown'
+          caption: `🎬 *${movie.title}*\n\n📝 *Overview:*\n${displayOverview}\n\n📂 Kumastream မှ ရရှိနိုင်ပါသည်`,
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔙 ပင်မမီနူး', 'back_menu')]
+          ])
         });
       } else {
-        await ctx.reply(`🎬 *${movie.title}*\n\n📝 *Overview:*\n${movie.overview}`, { parse_mode: 'Markdown' });
+        await ctx.reply(
+          `🎬 *${movie.title}*\n\n📝 *Overview:*\n${displayOverview}\n\n📂 Kumastream မှ ရရှိနိုင်ပါသည်`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback('🔙 ပင်မမီနူး', 'back_menu')]
+            ])
+          }
+        );
       }
 
       // 2. Video ပြမယ်
       if (movie.video_file_id) {
         await ctx.replyWithVideo(movie.video_file_id, {
-          caption: `🎬 ${movie.title} - Video`,
+          caption: `🎬 ${movie.title}`,
         });
       }
     }
