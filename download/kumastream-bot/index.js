@@ -43,7 +43,6 @@ const DATA_FILE = path.join(__dirname, 'botdata.json');
 // ============================================
 const addMovieState = {}; // { adminId: { step: 1|2|3, poster_file_id: '', title: '', overview: '' } }
 const searchState = {};  // { userId: true } - User က Search Mode မှာရှိနေလားဆိုတာ track လုပ်တယ်
-const searchState = {};  // { userId: true } - User က Search Mode မှာရှိနေလားဆိုတာ track လုပ်တယ်
 
 let botData = {
   users: {},           // { userId: { first_name, username, joinedAt, lastActive, subscribed } }
