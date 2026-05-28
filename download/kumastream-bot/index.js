@@ -59,6 +59,7 @@ const movieSchema = new mongoose.Schema({
   overview: { type: String, default: '' },
   overview_text: { type: String, default: '' },
   video_file_id: { type: String, default: '' },
+  video_type: { type: String, default: '' }, // 'video', 'document', 'animation'
   addedBy: { type: String, default: '' },
   addedAt: { type: Date, default: Date.now }
 });
@@ -356,11 +357,41 @@ async function displayAdminMovie(ctx, movie) {
     }
 
     // ===== 3. Video (Separate Message) =====
+    // video_type အလိုက် သင့်တော်တဲ့ method သုံးမယ်
     if (movie.video_file_id) {
-      await ctx.replyWithVideo(movie.video_file_id, {
-        caption: `🎬 ${safeTitle}`,
-        parse_mode: 'HTML',
-      });
+      const vType = movie.video_type || 'video';
+      try {
+        if (vType === 'document') {
+          // Document အနေနဲ့ပို့ထားတဲ့ video ကို document အနေနဲ့ပြန်ပို့မယ်
+          await ctx.replyWithDocument(movie.video_file_id, {
+            caption: `🎬 ${safeTitle}`,
+            parse_mode: 'HTML',
+          });
+        } else if (vType === 'animation') {
+          // Animation အနေနဲ့ပို့ထားတဲ့ video ကို animation အနေနဲ့ပြန်ပို့မယ်
+          await ctx.replyWithAnimation(movie.video_file_id, {
+            caption: `🎬 ${safeTitle}`,
+            parse_mode: 'HTML',
+          });
+        } else {
+          // Default: video type
+          await ctx.replyWithVideo(movie.video_file_id, {
+            caption: `🎬 ${safeTitle}`,
+            parse_mode: 'HTML',
+          });
+        }
+      } catch (videoErr) {
+        // Video ပြမှုမအောင်မြင်ရင် document အနေနဲ့ ထပ်စမ်းမယ်
+        console.error(`❌ Video display error (type: ${vType}):`, videoErr.message);
+        try {
+          await ctx.replyWithDocument(movie.video_file_id, {
+            caption: `🎬 ${safeTitle}`,
+          });
+        } catch (docErr) {
+          console.error(`❌ Document fallback also failed:`, docErr.message);
+          await ctx.reply(`🎬 Video ရရှိနိုင်ပါသည် (file ကြီးလို့ preview မပေးနိုင်ပါ)`);
+        }
+      }
     }
   } catch (err) {
     console.error(`❌ Display movie error ("${movie.title}"):`, err.message);
@@ -376,9 +407,31 @@ async function displayAdminMovie(ctx, movie) {
         await ctx.reply(`📝 Overview:\n\n${displayOverview}`);
       }
       if (movie.video_file_id) {
-        await ctx.replyWithVideo(movie.video_file_id, {
-          caption: `🎬 ${movie.title}`,
-        });
+        const vType = movie.video_type || 'video';
+        try {
+          if (vType === 'document') {
+            await ctx.replyWithDocument(movie.video_file_id, {
+              caption: `🎬 ${movie.title}`,
+            });
+          } else if (vType === 'animation') {
+            await ctx.replyWithAnimation(movie.video_file_id, {
+              caption: `🎬 ${movie.title}`,
+            });
+          } else {
+            await ctx.replyWithVideo(movie.video_file_id, {
+              caption: `🎬 ${movie.title}`,
+            });
+          }
+        } catch (vidErr) {
+          console.error(`❌ Fallback video display error:`, vidErr.message);
+          try {
+            await ctx.replyWithDocument(movie.video_file_id, {
+              caption: `🎬 ${movie.title}`,
+            });
+          } catch (docErr2) {
+            console.error(`❌ Fallback document also failed:`, docErr2.message);
+          }
+        }
       }
     } catch (err2) {
       console.error(`❌ Fallback display also failed:`, err2.message);
@@ -413,6 +466,7 @@ bot.use(async (ctx, next) => {
       const photo = ctx.message.photo;
       const fileId = photo[photo.length - 1].file_id;
       state.poster_file_id = fileId;
+      console.log(`📥 Step 1: Poster received from admin ${adminId}, file_id: YES`);
 
       // Caption မှာ ရုပ်ရှင်အမည် ရှိမရှိ စစ်ဆေးမယ်
       const caption = (ctx.message.caption || '').trim();
@@ -471,9 +525,10 @@ bot.use(async (ctx, next) => {
     if (state.step === 2 && ctx.message && ctx.message.text && !ctx.message.text.startsWith('/')) {
       state.overview = ctx.message.text;
       state.step = 3;
+      console.log(`📥 Step 2: Overview received from admin ${adminId}, title="${state.title}"`);
 
       await ctx.reply(
-        '✅ Overview လက်ခံရရှိပါပြီး!\n\n🎬 *အဆင့် ၃/၃: Video File ပို့ပါ*\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။\nVideo ပို့ပြီးရင် ဇတ်ကားအသစ် သိမ်းဆည်းသွားပါမယ်။',
+        '✅ Overview လက်ခံရရှိပါပြီး!\n\n🎬 *အဆင့် ၃/၃: Video File ပို့ပါ*\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။\nVideo ပို့ပြီးရင် ဇတ်ကားအသစ် သိမ်းဆည်းသွားပါမယ်။\n\n💡 *အကြံပြုချက်:*\n• Video ကို Video အနေနဲ့ပို့ပါ (File အနေနဲ့မဟုတ်ဘဲ)\n• ကြီးမားတဲ့ Video တွေအတွက် အချိန်အနည်းငယ်စောင့်ပါ\n• တင်ပြီးရင် Bot က အတည်ပြုမယ်',
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
@@ -486,27 +541,68 @@ bot.use(async (ctx, next) => {
     }
 
     // STEP 3: Video File လက်ခံခြင်း
-    if (state.step === 3 && ctx.message && (ctx.message.video || ctx.message.document)) {
-      const videoFileId = ctx.message.video ? ctx.message.video.file_id : ctx.message.document.file_id;
+    // Video, Document, Animation သုံးမျိုးလုံးလက်ခံမယ်
+    const msgVideo = ctx.message && ctx.message.video;
+    const msgDoc = ctx.message && ctx.message.document;
+    const msgAnim = ctx.message && ctx.message.animation;
 
-      const newMovie = await Movie.create({
-        title: state.title || 'Unknown Movie',
-        poster_file_id: state.poster_file_id,
-        overview: state.overview || '',
-        overview_text: state.overview || '',
-        video_file_id: videoFileId,
-        addedBy: ctx.from.first_name
-      });
+    if (state.step === 3 && ctx.message && (msgVideo || msgDoc || msgAnim)) {
+      // video_type ခွဲခြားမှ: 'video', 'document', 'animation'
+      let videoFileId = '';
+      let videoType = '';
+      if (msgVideo) {
+        videoFileId = msgVideo.file_id;
+        videoType = 'video';
+      } else if (msgAnim) {
+        videoFileId = msgAnim.file_id;
+        videoType = 'animation';
+      } else if (msgDoc) {
+        videoFileId = msgDoc.file_id;
+        videoType = 'document';
+      }
 
-      const totalMovies = await Movie.countDocuments();
-      console.log(`✅ New movie added: "${newMovie.title}" | Total: ${totalMovies}`);
+      console.log(`📥 Step 3: Video received - type: ${videoType}, file_id: ${videoFileId ? 'YES' : 'NO'}`);
+      console.log(`📥 Step 3: title="${state.title}", poster=${state.poster_file_id ? 'YES' : 'NO'}, overview=${state.overview ? 'YES' : 'NO'}`);
 
-      delete addMovieState[adminId];
+      try {
+        // MongoDB ချိတ်ဆက်မရရင် သတိပေးမယ်
+        if (!dbConnected) {
+          console.error('❌ Step 3: MongoDB ချိတ်ဆက်မရပါ!');
+          await ctx.reply(
+            '❌ *Database ချိတ်ဆက်မရပါ!*\n\nVideo ကိုသိမ်းဆည်းလို့မရပါ။ နောက်မှပြန်စမ်းပါ။',
+            { parse_mode: 'Markdown' }
+          );
+          return;
+        }
 
-      await ctx.reply(
-        `✅ *ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ!*\n\n🎬 အမည်: ${newMovie.title}\n🖼️ Poster ✅\n📝 Overview ✅\n🎬 Video ✅\n\n🔍 User တွေက /search ${newMovie.title} နဲ့ ရှာလို့ရပါပြီ`,
-        { parse_mode: 'Markdown' }
-      );
+        const newMovie = await Movie.create({
+          title: state.title || 'Unknown Movie',
+          poster_file_id: state.poster_file_id,
+          overview: state.overview || '',
+          overview_text: state.overview || '',
+          video_file_id: videoFileId,
+          video_type: videoType,
+          addedBy: ctx.from.first_name
+        });
+
+        const totalMovies = await Movie.countDocuments();
+        console.log(`✅ New movie added: "${newMovie.title}" | Video type: ${videoType} | Total: ${totalMovies}`);
+
+        delete addMovieState[adminId];
+
+        await ctx.reply(
+          `✅ *ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ!*\n\n🎬 အမည်: ${newMovie.title}\n🖼️ Poster ✅\n📝 Overview ✅\n🎬 Video ✅ (${videoType})\n\n🔍 User တွေက /search ${newMovie.title} နဲ့ ရှာလို့ရပါပြီ`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (err) {
+        console.error(`❌ Step 3: Movie create error:`, err.message);
+        console.error(`❌ Full error:`, err);
+        await ctx.reply(
+          `❌ *ဇတ်ကားသိမ်းဆည်းမှု မအောင်မြင်ပါ!*\n\nအမည်: ${state.title}\nပြဿနာ: ${err.message}\n\n💡 နောက်မှပြန်စမ်းပါ။ /admin ကနေ ပြန်စပါ။`,
+          { parse_mode: 'Markdown' }
+        );
+        // State ကို မဖျက်ဘဲ ထားမယ် - user က ပြန်စမ်းချင်ရင် အတွက်
+      }
       return;
     }
   }
@@ -1014,28 +1110,42 @@ bot.action('skip_video', async (ctx) => {
   const state = addMovieState[adminId];
 
   if (!state) {
-    ctx.editMessageText('❌ Session မရှိပါ။ /addmovie ကိုပြန်စပါ');
+    ctx.editMessageText('❌ Session မရှိပါ။ /admin ကိုပြန်စပါ');
     return;
   }
 
-  const newMovie = await Movie.create({
-    title: state.title || 'Unknown Movie',
-    poster_file_id: state.poster_file_id,
-    overview: state.overview || '',
-    overview_text: state.overview || '',
-    video_file_id: '',
-    addedBy: ctx.from.first_name
-  });
+  try {
+    if (!dbConnected) {
+      await ctx.editMessageText('❌ Database ချိတ်ဆက်မရပါ! နောက်မှပြန်စမ်းပါ။');
+      return;
+    }
 
-  const totalMovies = await Movie.countDocuments();
-  console.log(`✅ New movie added (no video): "${newMovie.title}" | Total: ${totalMovies}`);
+    const newMovie = await Movie.create({
+      title: state.title || 'Unknown Movie',
+      poster_file_id: state.poster_file_id,
+      overview: state.overview || '',
+      overview_text: state.overview || '',
+      video_file_id: '',
+      video_type: '',
+      addedBy: ctx.from.first_name
+    });
 
-  delete addMovieState[adminId];
+    const totalMovies = await Movie.countDocuments();
+    console.log(`✅ New movie added (no video): "${newMovie.title}" | Total: ${totalMovies}`);
 
-  await ctx.editMessageText(
-    `✅ *ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ! (Video မပါ)*\n\n🎬 အမည်: ${newMovie.title}\n🖼️ Poster ✅\n📝 Overview ${newMovie.overview ? '✅' : '⏭️ ချန်လှပ်'}\n🎬 Video ⏭️ ချန်လှပ်\n\n🔍 User တွေက /search ${newMovie.title} နဲ့ ရှာလို့ရပါပြီ`,
-    { parse_mode: 'Markdown' }
-  );
+    delete addMovieState[adminId];
+
+    await ctx.editMessageText(
+      `✅ *ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ! (Video မပါ)*\n\n🎬 အမည်: ${newMovie.title}\n🖼️ Poster ✅\n📝 Overview ${newMovie.overview ? '✅' : '⏭️ ချန်လှပ်'}\n🎬 Video ⏭️ ချန်လှပ်\n\n🔍 User တွေက /search ${newMovie.title} နဲ့ ရှာလို့ရပါပြီ`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    console.error('❌ skip_video error:', err.message);
+    await ctx.editMessageText(
+      `❌ *သိမ်းဆည်းမှု မအောင်မြင်ပါ!*\n\nပြဿနာ: ${err.message}\n\n💡 /admin ကနေ ပြန်စပါ။`,
+      { parse_mode: 'Markdown' }
+    );
+  }
 });
 
 // 📺 Add Series
@@ -2102,6 +2212,17 @@ bot.on('message', (ctx) => {
 async function startBot() {
   // Bot ကို အရင်စတင်မယ် (MongoDB မစောင့်ဘဲ)
   try {
+// ============================================
+// GLOBAL ERROR HANDLER - Bot errors ကို catch လုပ်မယ်
+// ============================================
+bot.catch((err, ctx) => {
+  console.error('❌ Bot Error:', err.message);
+  if (ctx) {
+    console.error(`   Context: chat=${ctx.chat?.id}, from=${ctx.from?.id}, type=${ctx.updateType}`);
+  }
+  // Don't crash the bot, just log the error
+});
+
     await bot.launch();
     console.log('✅ Kumastream Bot အသက်ဝင်ပါပြီး!');
     console.log(`👤 Admin IDs: ${ADMIN_IDS.length > 0 ? ADMIN_IDS.join(', ') : 'မထည့်ရသေးပါ - ADMIN_IDS environment variable ထည့်ပါ'}`);
