@@ -103,7 +103,16 @@ function registerUser(ctx) {
 
 // Check admin
 function isAdmin(ctx) {
+  if (ADMIN_IDS.length === 0) {
+    console.warn(`⚠️ ADMIN_IDS မထည့်ထားပါ! User ${ctx.from.id} (${ctx.from.first_name}) က Admin Command သုံးချင်ပါတယ်။`);
+    return false; // ADMIN_IDS မရှိရင် ဘယ်သူမှ Admin မသုံးရ
+  }
   return ADMIN_IDS.includes(ctx.from.id);
+}
+
+// Admin မဟုတ်တဲ့သူ ဝင်ရောက်စရင် log လုပ်မယ်
+function logUnauthorizedAccess(ctx, command) {
+  console.warn(`🚫 Unauthorized Access! User: ${ctx.from.id} (${ctx.from.first_name}) tried: ${command}`);
 }
 
 // Load data on startup
@@ -580,7 +589,8 @@ bot.command('stats', (ctx) => {
 // /admin - Admin Panel
 bot.command('admin', (ctx) => {
   if (!isAdmin(ctx)) {
-    ctx.reply('⛔ ဤ Command ကို Admin သာ အသုံးပြုနိုင်ပါသည်');
+    logUnauthorizedAccess(ctx, '/admin');
+    ctx.reply('⛔ ဤ Command ကို Admin သာ အသုံးပြုနိုင်ပါသည်။\n\n👤 သင့် Telegram ID: ' + ctx.from.id + '\n\n⚠️ Admin ခွင့်ပြုချက် မရှိပါ။');
     return;
   }
 
@@ -926,6 +936,7 @@ bot.action('admin_back', (ctx) => {
 // /broadcast command - User အားလုံးကိုပို့
 bot.command('broadcast', (ctx) => {
   if (!isAdmin(ctx)) {
+    logUnauthorizedAccess(ctx, '/broadcast');
     ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
     return;
   }
@@ -965,6 +976,7 @@ bot.command('broadcast', (ctx) => {
 // /notify command - Subscribers ကိုပို့
 bot.command('notify', (ctx) => {
   if (!isAdmin(ctx)) {
+    logUnauthorizedAccess(ctx, '/notify');
     ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
     return;
   }
@@ -1004,6 +1016,7 @@ bot.command('notify', (ctx) => {
 // /listmovies command - Admin တင်ထားတဲ့ ဇတ်ကားတွေ ကြည့်ရန်
 bot.command('listmovies', async (ctx) => {
   if (!isAdmin(ctx)) {
+    logUnauthorizedAccess(ctx, '/listmovies');
     ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
     return;
   }
@@ -1047,6 +1060,7 @@ bot.command('listmovies', async (ctx) => {
 // /deletemovie command - Admin ဇတ်ကားဖျက်ရန်
 bot.command('deletemovie', (ctx) => {
   if (!isAdmin(ctx)) {
+    logUnauthorizedAccess(ctx, '/deletemovie');
     ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
     return;
   }
@@ -1081,6 +1095,7 @@ bot.command('deletemovie', (ctx) => {
 // /addmovie command - Step 1 ကိုစမယ်
 bot.command('addmovie', (ctx) => {
   if (!isAdmin(ctx)) {
+    logUnauthorizedAccess(ctx, '/addmovie');
     ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
     return;
   }
@@ -1101,6 +1116,7 @@ bot.command('addmovie', (ctx) => {
 // /addseries command
 bot.command('addseries', (ctx) => {
   if (!isAdmin(ctx)) {
+    logUnauthorizedAccess(ctx, '/addseries');
     ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
     return;
   }
