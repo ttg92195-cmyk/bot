@@ -5,9 +5,15 @@
 
 const { Telegraf } = require('telegraf');
 
-// ⚠️ လုံခြုံမှုအတွက် Token ကို environment variable ကနေယူသင့်ပါတယ်
-// ဥပမာ: const token = process.env.BOT_TOKEN;
-const token = 'ဒီနေရာမှာ သင့်ရဲ့ Token အသစ်ကို ထည့်ပါ';
+// Bot Token ကို Environment Variable ကနေယူပါတယ်
+// Railway/Render မှာ BOT_TOKEN လို့ Setting ထဲမှာထည့်ပေးပါ
+const token = process.env.BOT_TOKEN;
+
+if (!token) {
+  console.error('BOT_TOKEN environment variable မရှိပါ!');
+  console.error('Railway/Render မှာ Environment Variable အနေနဲ့ BOT_TOKEN ထည့်ပါ');
+  process.exit(1);
+}
 
 const bot = new Telegraf(token);
 
@@ -22,6 +28,11 @@ bot.start((ctx) => {
 // "hi" message - User က "hi" ပို့ရင် "Hello bro!" ပြန်ဖြေ
 // --------------------------------------------
 bot.hears('hi', (ctx) => {
+  ctx.reply('Hello bro!');
+});
+
+// စာလုံးအကြီး/အသေး ခွဲမှာမဟုတ်ပါ - Hi, HI, hI အကုန်ဖြေပါမယ်
+bot.hears(/hi/i, (ctx) => {
   ctx.reply('Hello bro!');
 });
 
