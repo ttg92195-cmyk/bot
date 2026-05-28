@@ -41,7 +41,7 @@ const DATA_FILE = path.join(__dirname, 'botdata.json');
 // ============================================
 // ADMIN MOVIE ADDING STATE + SEARCH STATE
 // ============================================
-const addMovieState = {}; // { adminId: { step: 1|2|3, poster_file_id: '', title: '', overview: '' } }
+const addMovieState = {}; // { adminId: { step: 1|2|3|4, poster_file_id: '', title: '', overview: '' } }
 const searchState = {};  // { userId: true } - User က Search Mode မှာရှိနေလားဆိုတာ track လုပ်တယ်
 
 let botData = {
@@ -198,7 +198,7 @@ function formatList(items, emoji = '🎥') {
 }
 
 // ============================================
-// MIDDLEWARE: Register user + Handle 3-step Add Movie
+// MIDDLEWARE: Register user + Handle 4-step Add Movie
 // ============================================
 bot.use(async (ctx, next) => {
   if (ctx.from) {
@@ -208,7 +208,11 @@ bot.use(async (ctx, next) => {
   }
 
   // ============================================
-  // 3-STEP ADD MOVIE HANDLER
+  // 4-STEP ADD MOVIE HANDLER
+  // Step 1: Poster (Photo)
+  // Step 2: Movie Title (Text)
+  // Step 3: Overview/Description (Text)
+  // Step 4: Video File
   // ============================================
   const adminId = ctx.from ? ctx.from.id : 0;
   const state = addMovieState[adminId];
@@ -224,7 +228,7 @@ bot.use(async (ctx, next) => {
       state.step = 2;
 
       await ctx.reply(
-        '✅ Poster လက်ခံရရှိပါပြီး!\n\n📝 *အဆင့် ၂/၃: Movie Overview ရေးပါ*\n\nဇတ်ကားအမည်နဲ့ အညွှန်းကို အောက်ပါပုံစံဖြင့်ရေးပါ:\n\n*ဇတ်ကားအမည် (နှစ်)*\nအညွှန်း/ဖော်ပြချက် အသေးစိတ်\n\nဥပမာ:\n*Appleseed Ex Machina (2007)*\nဒီဇတ်ကားက Sci-Fi Animation တစ်ကားဖြစ်ပြီး...',
+        '✅ Poster လက်ခံရရှိပါပြီး!\n\n📝 *အဆင့် ၂/၄: ရုပ်ရှင်အမည် ရိုက်ပါ*\n\nရုပ်ရှင်အမည်ကို သီးသန့်ရိုက်ပါ။\nဒီအမည်နဲ့ User တွေက /search မှာ ရှာလို့ရမှာပါ။\n\nဥပမာ:\nAppleseed Ex Machina (2007)\nAvengers: Endgame\nSquid Game Season 2',
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
@@ -232,16 +236,34 @@ bot.use(async (ctx, next) => {
           ])
         }
       );
-      return; // Stop processing other handlers
+      return;
     }
 
-    // STEP 2: Overview (Text) လက်ခံခြင်း
+    // STEP 2: Movie Title (Text) လက်ခံခြင်း
     if (state.step === 2 && ctx.message && ctx.message.text && !ctx.message.text.startsWith('/')) {
-      state.overview = ctx.message.text;
+      state.title = ctx.message.text.trim();
       state.step = 3;
 
       await ctx.reply(
-        '✅ Overview လက်ခံရရှိပါပြီး!\n\n🎬 *အဆင့် ၃/၃: Video File ပို့ပါ*\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။\nVideo ပို့ပြီးရင် ဇတ်ကားအသစ် သိမ်းဆည်းသွားပါမယ်။',
+        `✅ ရုပ်ရှင်အမည်: *${state.title}*\n\n📝 *အဆင့် ၃/၄: Overview/ဖော်ပြချက် ရေးပါ*\n\nဇတ်ကားအကြောင်း အသေးစိတ်ဖော်ပြချက်ကို ရေးပါ။\n\nဥပမာ:\nဒီဇတ်ကားက Sci-Fi Animation တစ်ကားဖြစ်ပြီး နောက်ဆုံးတွင် လူသားများ၏ ကျွန်းမြို့ကို ကယ်တင်ရန် စစ်တိုက်ရတဲ့ ဇာတ်လမ်း...`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('⏭️ Overview မပါ', 'skip_overview')],
+            [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
+          ])
+        }
+      );
+      return;
+    }
+
+    // STEP 3: Overview (Text) လက်ခံခြင်း
+    if (state.step === 3 && ctx.message && ctx.message.text && !ctx.message.text.startsWith('/')) {
+      state.overview = ctx.message.text;
+      state.step = 4;
+
+      await ctx.reply(
+        '✅ Overview လက်ခံရရှိပါပြီး!\n\n🎬 *အဆင့် ၄/၄: Video File ပို့ပါ*\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။\nVideo ပို့ပြီးရင် ဇတ်ကားအသစ် သိမ်းဆည်းသွားပါမယ်။',
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
@@ -253,20 +275,15 @@ bot.use(async (ctx, next) => {
       return;
     }
 
-    // STEP 3: Video File လက်ခံခြင်း
-    if (state.step === 3 && ctx.message && (ctx.message.video || ctx.message.document)) {
+    // STEP 4: Video File လက်ခံခြင်း
+    if (state.step === 4 && ctx.message && (ctx.message.video || ctx.message.document)) {
       const videoFileId = ctx.message.video ? ctx.message.video.file_id : ctx.message.document.file_id;
 
-      // ဇတ်ကားအမည်ကို Overview ပထမစာကြောင်းကနေယူမယ်
-      const overviewLines = state.overview.split('\n');
-      const titleLine = overviewLines[0].replace(/\*/g, '').trim();
-      const overviewText = overviewLines.slice(1).join('\n').trim() || state.overview;
-
       const newMovie = {
-        title: titleLine || 'Unknown Movie',
+        title: state.title || 'Unknown Movie',
         poster_file_id: state.poster_file_id,
-        overview: state.overview,
-        overview_text: overviewText,
+        overview: state.overview || '',
+        overview_text: state.overview || '',
         video_file_id: videoFileId,
         addedBy: ctx.from.first_name,
         addedAt: new Date().toISOString()
@@ -279,7 +296,7 @@ bot.use(async (ctx, next) => {
       delete addMovieState[adminId];
 
       await ctx.reply(
-        `✅ *ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ!*\n\n🎬 ${newMovie.title}\n🖼️ Poster ✅\n📝 Overview ✅\n🎬 Video ✅\n\n🔍 User တွေက /search ${newMovie.title} နဲ့ ရှာလို့ရပါပြီ`,
+        `✅ *ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ!*\n\n🎬 အမည်: ${newMovie.title}\n🖼️ Poster ✅\n📝 Overview ✅\n🎬 Video ✅\n\n🔍 User တွေက /search ${newMovie.title} နဲ့ ရှာလို့ရပါပြီ`,
         { parse_mode: 'Markdown' }
       );
       return;
@@ -678,7 +695,7 @@ bot.action('admin_notify', (ctx) => {
   );
 });
 
-// 🎬 Add Movie - 3 Step Flow
+// 🎬 Add Movie - 4 Step Flow
 bot.action('admin_addmovie', (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
   ctx.answerCbQuery();
@@ -687,7 +704,7 @@ bot.action('admin_addmovie', (ctx) => {
   addMovieState[ctx.from.id] = { step: 1, poster_file_id: '', title: '', overview: '' };
 
   ctx.editMessageText(
-    '🎬 *ရုပ်ရှင်အသစ်ထည့်ရန် - အဆင့် ၁/၃*\n\n🖼️ *Movie Poster ပို့ပါ*\n\nရုပ်ရှင် Poster ပုံကို ဒီ Chat ထဲမှာ ပို့ပါ။\nပုံပို့ပြီးရင် နောက်အဆင့်ကို အလိုလိုသွားပါမယ်။',
+    '🎬 *ရုပ်ရှင်အသစ်ထည့်ရန် - အဆင့် ၁/၄*\n\n🖼️ *Movie Poster ပို့ပါ*\n\nရုပ်ရှင် Poster ပုံကို ဒီ Chat ထဲမှာ ပို့ပါ။\nပုံပို့ပြီးရင် နောက်အဆင့်ကို အလိုလိုသွားပါမယ်။\n\n📌 အဆင့် ၄ ဆင့်ရှိပါတယ်:\n၁။ Poster ပုံ\n၂။ ရုပ်ရှင်အမည်\n၃။ Overview/ဖော်ပြချက်\n၄။ Video File',
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
@@ -712,6 +729,34 @@ bot.action('cancel_addmovie', (ctx) => {
   });
 });
 
+// ⏭️ Skip Overview - Overview မပါရင် ချန်လှပ်
+bot.action('skip_overview', async (ctx) => {
+  if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
+  ctx.answerCbQuery();
+
+  const adminId = ctx.from.id;
+  const state = addMovieState[adminId];
+
+  if (!state) {
+    ctx.editMessageText('❌ Session မရှိပါ။ /addmovie ကိုပြန်စပါ');
+    return;
+  }
+
+  state.overview = '';
+  state.step = 4; // သွားတော့ Step 4 (Video)
+
+  await ctx.editMessageText(
+    `✅ ရုပ်ရှင်အမည်: *${state.title}*\n📝 Overview: ⏭️ ချန်လှပ်\n\n🎬 *အဆင့် ၄/၄: Video File ပို့ပါ*\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။`,
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('⏭️ Video မပါ', 'skip_video')],
+        [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
+      ])
+    }
+  );
+});
+
 // ⏭️ Skip Video - Video မပါရင် ချန်လှပ်
 bot.action('skip_video', async (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
@@ -725,16 +770,11 @@ bot.action('skip_video', async (ctx) => {
     return;
   }
 
-  // ဇတ်ကားအမည်ကို Overview ပထမစာကြောင်းကနေယူမယ်
-  const overviewLines = state.overview.split('\n');
-  const titleLine = overviewLines[0].replace(/\*/g, '').trim();
-  const overviewText = overviewLines.slice(1).join('\n').trim() || state.overview;
-
   const newMovie = {
-    title: titleLine || 'Unknown Movie',
+    title: state.title || 'Unknown Movie',
     poster_file_id: state.poster_file_id,
-    overview: state.overview,
-    overview_text: overviewText,
+    overview: state.overview || '',
+    overview_text: state.overview || '',
     video_file_id: '', // Video မပါ
     addedBy: ctx.from.first_name,
     addedAt: new Date().toISOString()
@@ -747,7 +787,7 @@ bot.action('skip_video', async (ctx) => {
   delete addMovieState[adminId];
 
   await ctx.editMessageText(
-    `✅ *ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ! (Video မပါ)*\n\n🎬 ${newMovie.title}\n🖼️ Poster ✅\n📝 Overview ✅\n🎬 Video ⏭️ ချန်လှပ်\n\n🔍 User တွေက /search ${newMovie.title} နဲ့ ရှာလို့ရပါပြီ`,
+    `✅ *ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ! (Video မပါ)*\n\n🎬 အမည်: ${newMovie.title}\n🖼️ Poster ✅\n📝 Overview ${newMovie.overview ? '✅' : '⏭️ ချန်လှပ်'}\n🎬 Video ⏭️ ချန်လှပ်\n\n🔍 User တွေက /search ${newMovie.title} နဲ့ ရှာလို့ရပါပြီ`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -1048,7 +1088,7 @@ bot.command('addmovie', (ctx) => {
   addMovieState[ctx.from.id] = { step: 1, poster_file_id: '', title: '', overview: '' };
 
   ctx.reply(
-    '🎬 *ရုပ်ရှင်အသစ်ထည့်ရန် - အဆင့် ၁/၃*\n\n🖼️ *Movie Poster ပို့ပါ*\n\nရုပ်ရှင် Poster ပုံကို ဒီ Chat ထဲမှာ ပို့ပါ။\nပုံပို့ပြီးရင် နောက်အဆင့်ကို အလိုလိုသွားပါမယ်။',
+    '🎬 *ရုပ်ရှင်အသစ်ထည့်ရန် - အဆင့် ၁/၄*\n\n🖼️ *Movie Poster ပို့ပါ*\n\nရုပ်ရှင် Poster ပုံကို ဒီ Chat ထဲမှာ ပို့ပါ။\nပုံပို့ပြီးရင် နောက်အဆင့်ကို အလိုလိုသွားပါမယ်။\n\n📌 အဆင့် ၄ ဆင့်ရှိပါတယ်:\n၁။ Poster ပုံ\n၂။ ရုပ်ရှင်အမည်\n၃။ Overview/ဖော်ပြချက်\n၄။ Video File',
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
@@ -1320,10 +1360,10 @@ bot.command('search', async (ctx) => {
 // 🔍 ခလုတ်နှိပ်ပြီး စာသားရိုက်ရင် Search အဖြစ်လက်ခံမယ်
 // ============================================
 bot.on('text', async (ctx, next) => {
-  // Admin က Add Movie Step 2 မှာဆိုရင် မစsearch ပါနဲ့
+  // Admin က Add Movie Step 2 (Title) နဲ့ Step 3 (Overview) မှာဆိုရင် Search မဝင်ပါနဲ့
   const adminId = ctx.from ? ctx.from.id : 0;
   const addState = addMovieState[adminId];
-  if (addState && isAdmin(ctx)) {
+  if (addState && isAdmin(ctx) && (addState.step === 2 || addState.step === 3)) {
     return next(); // Add Movie flow ကိုဆက်သွားစေ
   }
 
