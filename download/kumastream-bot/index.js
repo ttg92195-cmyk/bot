@@ -190,7 +190,11 @@ async function connectDB() {
   console.log(`🔗 Connecting to: ${connectURI.replace(/:([^@]+)@/, ':****@')}`);
 
   try {
-    await mongoose.connect(connectURI);
+    await mongoose.connect(connectURI, {
+      serverSelectionTimeoutMS: 15000, // 15 စက္ကန့် timeout
+      connectTimeoutMS: 15000,
+      socketTimeoutMS: 30000,
+    });
     dbConnected = true;
     console.log('✅ MongoDB သို့ ချိတ်ဆက်ပြီးပါပြီ!');
 
@@ -204,6 +208,7 @@ async function connectDB() {
   } catch (err) {
     console.error('❌ MongoDB ချိတ်ဆက်မရ:', err.message);
     console.warn('⚠️ Bot က MongoDB မပါဘဲ ဆက်လည်ပါမယ်...');
+    console.warn('⚠️ ဖြေရှင်းနည်း: MongoDB Atlas → Network Access → 0.0.0.0/0 ကို Add ပါ');
   }
 }
 
@@ -2091,21 +2096,30 @@ bot.on('message', (ctx) => {
 // Bot Start
 // ============================================
 // ============================================
-// BOT STARTUP - MongoDB ချိတ်ဆက်ပြီးမှ Bot စတင်မယ်
+// BOT STARTUP - Bot ကို အရင်စတင်မယ်၊ MongoDB ကို background မှာ ချိတ်ဆက်မယ်
+// Fix: MongoDB ချိတ်ဆက်မှု hang ဖြစ်ရင် Bot က ဆက်လည်နိုင်အောင်
 // ============================================
 async function startBot() {
-  // MongoDB ချိတ်ဆက်မယ်
-  await connectDB();
-
-  // Bot ကို စတင်မယ်
-  bot.launch().then(async () => {
-    const movieCount = dbConnected ? await Movie.countDocuments() : 0;
-    console.log('✅ Kumastream Bot Level 4 (MongoDB) အသက်ဝင်ပါပြီး!');
+  // Bot ကို အရင်စတင်မယ် (MongoDB မစောင့်ဘဲ)
+  try {
+    await bot.launch();
+    console.log('✅ Kumastream Bot အသက်ဝင်ပါပြီး!');
     console.log(`👤 Admin IDs: ${ADMIN_IDS.length > 0 ? ADMIN_IDS.join(', ') : 'မထည့်ရသေးပါ - ADMIN_IDS environment variable ထည့်ပါ'}`);
+    console.log(`📊 Storage: ${dbConnected ? 'MongoDB Atlas ✅' : '⏳ MongoDB ချိတ်ဆက်နေဆဲ...'}`);
+  } catch (err) {
+    console.error('❌ Bot စတင်မှု မအောင်မြင်ပါ:', err.message);
+    process.exit(1);
+  }
+
+  // MongoDB ကို background မှာ ချိတ်ဆက်မယ် (Bot က နောက်မကျနေအောင်)
+  connectDB().then(async () => {
+    const movieCount = dbConnected ? await Movie.countDocuments() : 0;
     console.log(`🎬 Movies in DB: ${movieCount} (No Limit)`);
-    console.log(`📊 Storage: ${dbConnected ? 'MongoDB Atlas - Data persists across restarts!' : '⚠️ MongoDB မချိတ်ဆက်ထား - Data မသိမ်းဆည်းနိုင်ပါ'}`);
+    if (dbConnected) {
+      console.log('📊 Storage: MongoDB Atlas - Data persists across restarts! ✅');
+    }
   }).catch((err) => {
-    console.error('Bot စတင်မှု မအောင်မြင်ပါ:', err);
+    console.error('❌ MongoDB background connect error:', err.message);
   });
 }
 
