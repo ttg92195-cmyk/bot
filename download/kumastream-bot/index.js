@@ -1869,6 +1869,71 @@ bot.command('dbstatus', async (ctx) => {
   });
 });
 
+// /listmovies command - Admin သိမ်းဆည်းထားတဲ့ ဇတ်ကား အကုန်ပြမယ်
+bot.command('listmovies', async (ctx) => {
+  if (!isAdmin(ctx)) {
+    ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
+    return;
+  }
+
+  if (!MONGODB_URI) {
+    ctx.reply('❌ MONGODB_URI မရှိပါ!');
+    return;
+  }
+
+  // ချိတ်ဆက်မရရင် ပြန်ချိတ်ဆက်စမ်းမယ်
+  if (!dbConnected) {
+    await ensureDBConnected();
+  }
+
+  if (!dbConnected) {
+    ctx.reply('❌ Database ချိတ်ဆက်မရပါ! /dbstatus နဲ့ စစ်ပါ။', {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔄 Reconnect', 'admin_reconnect_db')],
+        [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+      ])
+    });
+    return;
+  }
+
+  try {
+    const totalMovies = await Movie.countDocuments();
+    if (totalMovies === 0) {
+      ctx.reply('⚠️ Database မှာ ဇတ်ကား တစ်ကားမှ မရှိပါ!\n\n🎬 /addmovie နဲ့ ဇတ်ကားထည့်ပါ။', {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🎬 Add Movie', 'admin_addmovie')],
+          [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+        ])
+      });
+      return;
+    }
+
+    const movies = await Movie.find().sort({ addedAt: -1 }).limit(20);
+    let movieList = `🎬 <b>သိမ်းဆည်းထားတဲ့ ဇတ်ကားများ</b> (${totalMovies} ကား)\n\n`;
+    movies.forEach((m, i) => {
+      const hasVideo = m.video_file_id ? '🎬' : '⏭️';
+      const hasPoster = m.poster_file_id ? '🖼️' : '⏭️';
+      movieList += `${i + 1}. ${escapeHtml(m.title)} ${hasVideo}${hasPoster}\n`;
+    });
+
+    if (totalMovies > 20) {
+      movieList += `\n... နောက်ထပ် ${totalMovies - 20} ကား ရှိသေးပါတယ်`;
+    }
+
+    ctx.reply(movieList, {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+      ])
+    });
+  } catch (err) {
+    console.error('listmovies error:', err.message);
+    ctx.reply(`❌ ဇတ်ကားစာရင်း မယူနိုင်ပါ: ${err.message}`);
+  }
+});
+
 // /addmovie command - 3 Step Flow
 bot.command('addmovie', (ctx) => {
   if (!isAdmin(ctx)) {
@@ -2031,17 +2096,24 @@ bot.command('search', async (ctx) => {
   const queryEscaped = escapeRegex(queryLower); // Regex special chars တွေကို escape လုပ်မယ်
 
   // Admin Movies ထဲမှာရှာမယ် (MongoDB)
+  // dbConnected မှန်ရင် တိုက်ရိုက်ရှာမယ်၊ မရရင် ပြန်ချိတ်ဆက်စမ်းမယ်
   let adminMovieResults = [];
-  if (dbConnected) {
-    try {
-      adminMovieResults = await Movie.find({
-        $or: [
-          { title: { $regex: queryEscaped, $options: 'i' } },
-          { overview: { $regex: queryEscaped, $options: 'i' } },
-          { overview_text: { $regex: queryEscaped, $options: 'i' } }
-        ]
-      }).limit(3);
-    } catch (err) { console.error('search admin movies error:', err.message); }
+  if (dbConnected || MONGODB_URI) {
+    if (!dbConnected) {
+      console.log('🔍 Search: MongoDB disconnected, trying to reconnect...');
+      await ensureDBConnected();
+    }
+    if (dbConnected) {
+      try {
+        adminMovieResults = await Movie.find({
+          $or: [
+            { title: { $regex: queryEscaped, $options: 'i' } },
+            { overview: { $regex: queryEscaped, $options: 'i' } },
+            { overview_text: { $regex: queryEscaped, $options: 'i' } }
+          ]
+        }).limit(3);
+      } catch (err) { console.error('search admin movies error:', err.message); }
+    }
   }
 
   // Built-in moviesDB ထဲမှာရှာမယ်
@@ -2076,6 +2148,7 @@ bot.command('search', async (ctx) => {
   // ဘာမှမရှာတွေ့ရင်
   if (movieResults.length === 0 && seriesResults.length === 0 && adminMovieResults.length === 0) {
     let adminMovieCount = 0;
+    if (!dbConnected && MONGODB_URI) { await ensureDBConnected(); }
     if (dbConnected) { try { adminMovieCount = await Movie.countDocuments(); } catch(e) {} }
     let hint = '';
     if (adminMovieCount === 0) {
@@ -2156,17 +2229,24 @@ bot.on('text', async (ctx, next) => {
     const queryEscaped = escapeRegex(queryLower); // Regex special chars တွေကို escape လုပ်မယ်
 
     // Admin Movies ထဲမှာရှာမယ် (MongoDB)
+    // dbConnected မှန်ရင် တိုက်ရိုက်ရှာမယ်၊ မရရင် ပြန်ချိတ်ဆက်စမ်းမယ်
     let adminMovieResults = [];
-    if (dbConnected) {
-      try {
-        adminMovieResults = await Movie.find({
-          $or: [
-            { title: { $regex: queryEscaped, $options: 'i' } },
-            { overview: { $regex: queryEscaped, $options: 'i' } },
-            { overview_text: { $regex: queryEscaped, $options: 'i' } }
-          ]
-        }).limit(3);
-      } catch (err) { console.error('text search admin movies error:', err.message); }
+    if (dbConnected || MONGODB_URI) {
+      if (!dbConnected) {
+        console.log('🔍 Text search: MongoDB disconnected, trying to reconnect...');
+        await ensureDBConnected();
+      }
+      if (dbConnected) {
+        try {
+          adminMovieResults = await Movie.find({
+            $or: [
+              { title: { $regex: queryEscaped, $options: 'i' } },
+              { overview: { $regex: queryEscaped, $options: 'i' } },
+              { overview_text: { $regex: queryEscaped, $options: 'i' } }
+            ]
+          }).limit(3);
+        } catch (err) { console.error('text search admin movies error:', err.message); }
+      }
     }
 
     // Built-in moviesDB ထဲမှာရှာမယ်
@@ -2199,6 +2279,7 @@ bot.on('text', async (ctx, next) => {
     // ဘာမှမရှာတွေ့ရင်
     if (movieResults.length === 0 && seriesResults.length === 0 && adminMovieResults.length === 0) {
       let adminMovieCount = 0;
+    if (!dbConnected && MONGODB_URI) { await ensureDBConnected(); }
     if (dbConnected) { try { adminMovieCount = await Movie.countDocuments(); } catch(e) {} }
       let hint = '';
       if (adminMovieCount === 0) {
@@ -2396,6 +2477,7 @@ bot.action('search', async (ctx) => {
   const userId = ctx.from.id.toString();
   searchState[userId] = true;
   let adminMovieCount = 0;
+  if (!dbConnected && MONGODB_URI) { await ensureDBConnected(); }
   if (dbConnected) { try { adminMovieCount = await Movie.countDocuments(); } catch(e) {} }
   let infoText = '';
   if (adminMovieCount > 0) {
