@@ -41,6 +41,7 @@ const WEB_URL = process.env.WEB_URL || '';
 // ADMIN MOVIE ADDING STATE + SEARCH STATE
 // ============================================
 const addMovieState = {}; // In-memory cache (fast) - backed up to MongoDB
+const addSeriesState = {}; // In-memory cache for Add Series - backed up to MongoDB
 const searchState = {};  // { userId: true }
 
 // ============================================
@@ -105,6 +106,67 @@ async function getAddMovieSession(adminId) {
 }
 
 // ============================================
+// SERIES SESSION HELPER: MongoDB-backed session persistence for Add Series
+// ============================================
+async function saveSeriesSessionToDB(adminId) {
+  if (!dbConnected) return;
+  try {
+    const state = addSeriesState[adminId];
+    if (state) {
+      await AddSeriesSession.findOneAndUpdate(
+        { adminId: String(adminId) },
+        { adminId: String(adminId), step: state.step, waitingTitle: state.waitingTitle, category: state.category, poster_file_id: state.poster_file_id, title: state.title, overview: state.overview, createdAt: new Date() },
+        { upsert: true }
+      );
+      console.log(`💾 Series Session saved to DB: admin=${adminId}, step=${state.step}, title="${state.title}"`);
+    }
+  } catch (err) {
+    console.error('saveSeriesSessionToDB error:', err.message);
+  }
+}
+
+async function loadSeriesSessionFromDB(adminId) {
+  if (!dbConnected) return null;
+  try {
+    const session = await AddSeriesSession.findOne({ adminId: String(adminId) });
+    if (session) {
+      addSeriesState[adminId] = {
+        step: session.step,
+        waitingTitle: session.waitingTitle || false,
+        category: session.category || 'trending',
+        poster_file_id: session.poster_file_id || '',
+        title: session.title || '',
+        overview: session.overview || ''
+      };
+      console.log(`📂 Series Session loaded from DB: admin=${adminId}, step=${session.step}, title="${session.title}"`);
+      return addSeriesState[adminId];
+    }
+  } catch (err) {
+    console.error('loadSeriesSessionFromDB error:', err.message);
+  }
+  return null;
+}
+
+async function deleteSeriesSessionFromDB(adminId) {
+  if (!dbConnected) return;
+  try {
+    await AddSeriesSession.deleteOne({ adminId: String(adminId) });
+    console.log(`🗑️ Series Session deleted from DB: admin=${adminId}`);
+  } catch (err) {
+    console.error('deleteSeriesSessionFromDB error:', err.message);
+  }
+}
+
+// Helper: Get series session (memory first, then MongoDB fallback)
+async function getAddSeriesSession(adminId) {
+  let state = addSeriesState[adminId];
+  if (!state) {
+    state = await loadSeriesSessionFromDB(adminId);
+  }
+  return state;
+}
+
+// ============================================
 // MONGOOSE SCHEMAS
 // ============================================
 
@@ -162,6 +224,36 @@ const addMovieSessionSchema = new mongoose.Schema({
 // TTL index: auto-delete sessions after 30 minutes
 addMovieSessionSchema.index({ createdAt: 1 }, { expireAfterSeconds: 1800 });
 const AddMovieSession = mongoose.model('AddMovieSession', addMovieSessionSchema);
+
+// Series Schema (MongoDB မှာ သိမ်းမယ် - restart ပျောက်မှာမဟုတ်တော့)
+const seriesSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  category: { type: String, default: 'trending' }, // trending, korean, anime, western
+  poster_file_id: { type: String, default: '' },
+  overview: { type: String, default: '' },
+  overview_text: { type: String, default: '' },
+  video_file_id: { type: String, default: '' },
+  year: { type: Number, default: 2024 },
+  rating: { type: String, default: '' },
+  status: { type: String, default: '' },
+  addedBy: { type: String, default: '' },
+  addedAt: { type: Date, default: Date.now }
+});
+const Series = mongoose.model('Series', seriesSchema);
+
+// Add Series Session Schema (persists across Railway restarts!)
+const addSeriesSessionSchema = new mongoose.Schema({
+  adminId: { type: String, required: true, unique: true },
+  step: { type: Number, default: 1 },
+  waitingTitle: { type: Boolean, default: false },
+  category: { type: String, default: 'trending' },
+  poster_file_id: { type: String, default: '' },
+  title: { type: String, default: '' },
+  overview: { type: String, default: '' },
+  createdAt: { type: Date, default: Date.now }
+});
+addSeriesSessionSchema.index({ createdAt: 1 }, { expireAfterSeconds: 1800 });
+const AddSeriesSession = mongoose.model('AddSeriesSession', addSeriesSessionSchema);
 
 // ============================================
 // MONGODB CONNECTION
@@ -536,6 +628,70 @@ async function displayAdminMovie(ctx, movie) {
 }
 
 // ============================================
+// HELPER: Display Admin Series search result
+// Movie နဲ့ အတူတူပါပဲ - Poster + Overview + Video
+// ============================================
+async function displayAdminSeries(ctx, series) {
+  const displayOverview = series.overview_text || series.overview || '';
+  const safeTitle = escapeHtml(series.title);
+  const safeOverview = escapeHtml(displayOverview);
+  const catLabel = seriesCategoryLabels[series.category] || series.category || '';
+
+  try {
+    // ===== 1. Poster + Series Name =====
+    if (series.poster_file_id) {
+      const caption = `📺 <b>${safeTitle}</b>\n📂 ${catLabel}\n\n📂 Kumastream မှ ရရှိနိုင်ပါသည်`;
+      const safeCaption = caption.length > 1000 ? caption.substring(0, 1000) + '...' : caption;
+
+      await ctx.replyWithPhoto(series.poster_file_id, {
+        caption: safeCaption,
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔙 ပင်မမီနူး', 'back_menu')]
+        ])
+      });
+    } else {
+      await ctx.reply(
+        `📺 <b>${safeTitle}</b>\n📂 ${catLabel}\n\n📂 Kumastream မှ ရရှိနိုင်ပါသည်`,
+        {
+          parse_mode: 'HTML',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔙 ပင်မမီနူး', 'back_menu')]
+          ])
+        }
+      );
+    }
+
+    // ===== 2. Overview =====
+    if (safeOverview) {
+      const overviewText = `📝 <b>Overview:</b>\n\n${safeOverview}`;
+      const safeOverviewText = overviewText.length > 4000 ? overviewText.substring(0, 4000) + '...' : overviewText;
+      await ctx.reply(safeOverviewText, { parse_mode: 'HTML' });
+    }
+
+    // ===== 3. Video =====
+    if (series.video_file_id) {
+      await ctx.replyWithVideo(series.video_file_id, {
+        caption: `📺 ${safeTitle}`,
+        parse_mode: 'HTML',
+      });
+    }
+  } catch (err) {
+    console.error(`❌ Display series error ("${series.title}"):`, err.message);
+    try {
+      await ctx.reply(
+        `📺 ${series.title}\n📂 ${catLabel}\n\n📂 Kumastream မှ ရရှိနိုင်ပါသည်`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('🔙 ပင်မမီနူး', 'back_menu')]
+        ])
+      );
+    } catch (err2) {
+      console.error(`❌ Fallback display also failed:`, err2.message);
+    }
+  }
+}
+
+// ============================================
 // MIDDLEWARE: Register user + Handle 3-step Add Movie
 // ============================================
 bot.use(async (ctx, next) => {
@@ -710,6 +866,172 @@ bot.use(async (ctx, next) => {
               ...Markup.inlineKeyboard([
                 [Markup.button.callback('⏭️ Video မပါ', 'skip_video')],
                 [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
+              ])
+            }
+          );
+        } catch (err2) {
+          console.error('❌ Error reply also failed:', err2.message);
+        }
+      }
+      return;
+    }
+  }
+
+  // ============================================
+  // 3-STEP ADD SERIES HANDLER
+  // Step 1: Poster (Photo) + Series Title (Caption)
+  // Step 2: Overview/Description (Text)
+  // Step 3: Video File
+  // ============================================
+  const seriesState = await getAddSeriesSession(adminId);
+
+  if (seriesState && isAdmin(ctx)) {
+
+    // STEP 1: Poster (Photo) လက်ခံခြင်း + Caption ကနေ အမည်ယူမယ်
+    if (seriesState.step === 1 && ctx.message && ctx.message.photo) {
+      const photo = ctx.message.photo;
+      const fileId = photo[photo.length - 1].file_id;
+      seriesState.poster_file_id = fileId;
+
+      const caption = (ctx.message.caption || '').trim();
+      if (caption) {
+        seriesState.title = caption;
+        seriesState.step = 2;
+        console.log('📺 Series Step changed to', seriesState.step, 'for admin', adminId);
+        await saveSeriesSessionToDB(adminId);
+
+        const safeTitle = escapeHtml(seriesState.title);
+        const catLabel = { trending: '🔥 Trending', korean: '🇰🇷 Korean', anime: '🇯🇵 Anime', western: '🇺🇸 Western' }[seriesState.category] || seriesState.category;
+        await ctx.reply(
+          `✅ Poster + အမည် လက်ခံရရှိပါပြီး!\n\n🖼️ Poster ✅\n📺 အမည်: <b>${safeTitle}</b>\n📂 အမျိုးအစား: ${catLabel}\n\n📝 <b>အဆင့် ၂/၃: Overview/ဖော်ပြချက် ရေးပါ</b>\n\nဇတ်ကားအကြောင်း အသေးစိတ်ဖော်ပြချက်ကို ရေးပါ။`,
+          {
+            parse_mode: 'HTML',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback('⏭️ Overview မပါ', 'skip_series_overview')],
+              [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addseries')]
+            ])
+          }
+        );
+      } else {
+        seriesState.waitingTitle = true;
+        await saveSeriesSessionToDB(adminId);
+
+        await ctx.reply(
+          '✅ Poster လက်ခံရရှိပါပြီး!\n\n📝 <b>TV Show အမည် ရိုက်ပါ</b>\n\nရုပ်ရှင်အမည်ကို သီးသန့်ရိုက်ပါ။',
+          {
+            parse_mode: 'HTML',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addseries')]
+            ])
+          }
+        );
+      }
+      return;
+    }
+
+    // STEP 1b: Caption မပါခဲ့ရင် အမည် သီးသန့်လက်ခံခြင်း
+    if (seriesState.step === 1 && seriesState.waitingTitle && ctx.message && ctx.message.text && !ctx.message.text.startsWith('/')) {
+      seriesState.title = ctx.message.text.trim();
+      seriesState.waitingTitle = false;
+      seriesState.step = 2;
+      console.log('📺 Series Step changed to', seriesState.step, 'for admin', adminId);
+      await saveSeriesSessionToDB(adminId);
+
+      const safeTitle = escapeHtml(seriesState.title);
+      const catLabel = { trending: '🔥 Trending', korean: '🇰🇷 Korean', anime: '🇯🇵 Anime', western: '🇺🇸 Western' }[seriesState.category] || seriesState.category;
+      await ctx.reply(
+        `✅ TV Show အမည်: <b>${safeTitle}</b>\n📂 အမျိုးအစား: ${catLabel}\n\n📝 <b>အဆင့် ₂/₃: Overview/ဖော်ပြချက် ရေးပါ</b>\n\nဇတ်ကားအကြောင်း အသေးစိတ်ဖော်ပြချက်ကို ရေးပါ။`,
+        {
+          parse_mode: 'HTML',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('⏭️ Overview မပါ', 'skip_series_overview')],
+            [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addseries')]
+          ])
+        }
+      );
+      return;
+    }
+
+    // STEP 2: Overview (Text) လက်ခံခြင်း
+    if (seriesState.step === 2 && ctx.message && ctx.message.text && !ctx.message.text.startsWith('/')) {
+      seriesState.overview = ctx.message.text;
+      seriesState.step = 3;
+      console.log('📺 Series Step changed to', seriesState.step, 'for admin', adminId);
+      await saveSeriesSessionToDB(adminId);
+
+      await ctx.reply(
+        '✅ Overview လက်ခံရရှိပါပြီး!\n\n🎬 <b>အဆင့် ၃/၃: Video File ပို့ပါ</b>\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။\n📌 Channel ကနေ Forward လုပ်တာလည်း လက်ခံပါတယ်။\nVideo ပို့ပြီးရင် TV Show အသစ် သိမ်းဆည်းသွားပါမယ်။',
+        {
+          parse_mode: 'HTML',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('⏭️ Video မပါ', 'skip_series_video')],
+            [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addseries')]
+          ])
+        }
+      );
+      return;
+    }
+
+    // STEP 3: Video File လက်ခံခြင်း
+    const isSeriesVideo = ctx.message && (ctx.message.video || ctx.message.document || ctx.message.animation);
+    if (seriesState.step === 3 && isSeriesVideo) {
+      try {
+        let videoFileId = '';
+        let videoType = 'unknown';
+        if (ctx.message.video) {
+          videoFileId = ctx.message.video.file_id;
+          videoType = 'video';
+        } else if (ctx.message.document) {
+          videoFileId = ctx.message.document.file_id;
+          videoType = 'document';
+        } else if (ctx.message.animation) {
+          videoFileId = ctx.message.animation.file_id;
+          videoType = 'animation';
+        }
+        console.log('📺 Series Step 3 video received: type=', videoType, 'adminId=', adminId);
+
+        // DB ချိတ်ဆက်မှု သေချာအောင် စစ်ဆေး
+        if (!dbConnected || mongoose.connection.readyState !== 1) {
+          console.log('🔄 DB not connected, trying to reconnect...');
+          await ctx.reply('⏳ MongoDB ပြန်ချိတ်ဆက်နေပါသည်... ခဏစောင့်ပါ');
+          const reconnected = await ensureDBConnection();
+          if (!reconnected) {
+            await ctx.reply('⚠️ MongoDB ချိတ်ဆက်မှု ပျက်သွားပါသည်! /addseries နဲ့ ပြန်စပါ', { parse_mode: 'HTML' });
+            return;
+          }
+        }
+
+        const newSeries = await Series.create({
+          title: seriesState.title || 'Unknown Series',
+          category: seriesState.category || 'trending',
+          poster_file_id: seriesState.poster_file_id,
+          overview: seriesState.overview || '',
+          overview_text: seriesState.overview || '',
+          video_file_id: videoFileId,
+          addedBy: ctx.from.first_name
+        });
+
+        const totalSeries = await Series.countDocuments();
+        console.log(`✅ New series added: "${newSeries.title}" | Total: ${totalSeries}`);
+
+        delete addSeriesState[adminId];
+        await deleteSeriesSessionFromDB(adminId);
+
+        const safeTitle = escapeHtml(newSeries.title);
+        await ctx.reply(
+          `✅ <b>TV Show အသစ် သိမ်းဆည်းပြီးပါပြီ!</b>\n\n📺 အမည်: <b>${safeTitle}</b>\n🖼️ Poster ✅\n📝 Overview ✅\n🎬 Video ✅\n\n🔍 User တွေက /search ${safeTitle} နဲ့ ရှာလို့ရပါပြီ`,
+          { parse_mode: 'HTML' }
+        );
+      } catch (err) {
+        console.error('❌ Series Step 3 video save error:', err.message);
+        try {
+          await ctx.reply(
+            `❌ <b>Video သိမ်းဆည်းမှု အမှား!</b>\n\n📝 Error: ${escapeHtml(err.message)}\n\n💡 <b>ဖြေရှင်းနည်း:</b>\n1. ⏭️ Video မပါ ခလုတ်ကို နှိပ်ပါ\n2. /addseries နဲ့ ပြန်စပါ`,
+            {
+              parse_mode: 'HTML',
+              ...Markup.inlineKeyboard([
+                [Markup.button.callback('⏭️ Video မပါ', 'skip_series_video')],
+                [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addseries')]
               ])
             }
           );
@@ -1025,17 +1347,18 @@ bot.command('admin', async (ctx) => {
     return;
   }
 
-  let totalUsers = 0, subscribedUsers = 0, movieCount = 0;
+  let totalUsers = 0, subscribedUsers = 0, movieCount = 0, seriesCount = 0;
   if (dbConnected) {
     try {
       totalUsers = await User.countDocuments();
       subscribedUsers = await User.countDocuments({ subscribed: true });
       movieCount = await Movie.countDocuments();
+      seriesCount = await Series.countDocuments();
     } catch (err) { console.error('admin stats error:', err.message); }
   }
 
   ctx.reply(
-    `🛡️ *Admin Panel*\n\n👥 Users: ${totalUsers}\n🔔 Subscribed: ${subscribedUsers}\n🎬 Movies: ${movieCount} (Limit မရှိ)`,
+    `🛡️ *Admin Panel*\n\n👥 Users: ${totalUsers}\n🔔 Subscribed: ${subscribedUsers}\n🎬 Movies: ${movieCount} (Limit မရှိ)\n📺 Series: ${seriesCount} (Limit မရှိ)`,
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
@@ -1053,7 +1376,11 @@ bot.command('admin', async (ctx) => {
         ],
         [
           Markup.button.callback('📺 Add Series', 'admin_addseries'),
-          Markup.button.callback('🗑️ Delete Movie', 'admin_deletemovie')
+          Markup.button.callback('📂 Series List', 'admin_listseries')
+        ],
+        [
+          Markup.button.callback('🗑️ Delete Movie', 'admin_deletemovie'),
+          Markup.button.callback('🗑️ Delete Series', 'admin_deleteseries')
         ]
       ])
     }
@@ -1297,21 +1624,171 @@ bot.action('skip_video', async (ctx) => {
   }
 });
 
-// 📺 Add Series
+// ❌ Cancel Add Series
+bot.action('cancel_addseries', async (ctx) => {
+  ctx.answerCbQuery();
+  if (addSeriesState[ctx.from.id]) {
+    delete addSeriesState[ctx.from.id];
+  }
+  await deleteSeriesSessionFromDB(ctx.from.id);
+  ctx.editMessageText('❌ TV Show ထည့်ခြင်း ပယ်ဖျက်ပြီးပါပြီ', {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+    ])
+  });
+});
+
+// ⏭️ Skip Series Overview
+bot.action('skip_series_overview', async (ctx) => {
+  if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
+  ctx.answerCbQuery();
+
+  const adminId = ctx.from.id;
+  console.log('⏭️ Skip Series Overview clicked by admin', adminId);
+  const state = await getAddSeriesSession(adminId);
+
+  if (!state) {
+    console.log('⚠️ Series Session not found for admin', adminId);
+    await ctx.editMessageText('❌ Session မရှိပါ။ /addseries ကိုပြန်စပါ', { parse_mode: 'HTML' });
+    return;
+  }
+
+  state.overview = '';
+  state.step = 3;
+  console.log('📺 Series Step changed to', state.step, 'for admin', adminId);
+  await saveSeriesSessionToDB(adminId);
+
+  const safeTitle = escapeHtml(state.title);
+  const catLabel = seriesCategoryLabels[state.category] || state.category;
+  await ctx.editMessageText(
+    `✅ TV Show အမည်: <b>${safeTitle}</b>\n📂 အမျိုးအစား: ${catLabel}\n📝 Overview: ⏭️ ချန်လှပ်\n\n🎬 <b>အဆင့် ၃/၃: Video File ပို့ပါ</b>\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('⏭️ Video မပါ', 'skip_series_video')],
+        [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addseries')]
+      ])
+    }
+  );
+});
+
+// ⏭️ Skip Series Video
+bot.action('skip_series_video', async (ctx) => {
+  if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
+  ctx.answerCbQuery();
+
+  const adminId = ctx.from.id;
+  console.log('⏭️ Skip Series Video clicked by admin', adminId);
+  const state = await getAddSeriesSession(adminId);
+
+  if (!state) {
+    console.log('⚠️ Series Session not found for admin', adminId);
+    await ctx.editMessageText('❌ Session မရှိပါ။ /addseries ကိုပြန်စပါ', { parse_mode: 'HTML' });
+    return;
+  }
+
+  try {
+    // DB ချိတ်ဆက်မှု စစ်ဆေး
+    if (!dbConnected || mongoose.connection.readyState !== 1) {
+      console.log('🔄 DB not connected for skip_series_video, trying to reconnect...');
+      await ctx.reply('⏳ MongoDB ပြန်ချိတ်ဆက်နေပါသည်...');
+      const reconnected = await ensureDBConnection();
+      if (!reconnected) {
+        await ctx.reply('⚠️ MongoDB ချိတ်ဆက်မှု ပျက်သွားပါသည်! /addseries နဲ့ ပြန်စပါ', { parse_mode: 'HTML' });
+        return;
+      }
+    }
+
+    const newSeries = await Series.create({
+      title: state.title || 'Unknown Series',
+      category: state.category || 'trending',
+      poster_file_id: state.poster_file_id,
+      overview: state.overview || '',
+      overview_text: state.overview || '',
+      video_file_id: '',
+      addedBy: ctx.from.first_name
+    });
+
+    const totalSeries = await Series.countDocuments();
+    console.log(`✅ New series added (no video): "${newSeries.title}" | Total: ${totalSeries}`);
+
+    delete addSeriesState[adminId];
+    await deleteSeriesSessionFromDB(adminId);
+
+    const safeTitle = escapeHtml(newSeries.title);
+    const catLabel = seriesCategoryLabels[newSeries.category] || newSeries.category;
+    const safeOverview = newSeries.overview ? '✅' : '⏭️ ချန်လှပ်';
+    await ctx.editMessageText(
+      `✅ <b>TV Show အသစ် သိမ်းဆည်းပြီးပါပြီ! (Video မပါ)</b>\n\n📺 အမည်: <b>${safeTitle}</b>\n📂 အမျိုးအစား: ${catLabel}\n🖼️ Poster ✅\n📝 Overview ${safeOverview}\n🎬 Video ⏭️ ချန်လှပ်`,
+      { parse_mode: 'HTML' }
+    );
+  } catch (err) {
+    console.error('❌ Skip series video save error:', err.message);
+    try {
+      await ctx.reply(`❌ <b>သိမ်းဆည်းမှု အမှား!</b>\n\n📝 Error: ${escapeHtml(err.message)}\n\n💡 /addseries နဲ့ ပြန်စပါ`, { parse_mode: 'HTML' });
+    } catch (err2) {
+      console.error('❌ Error reply also failed:', err2.message);
+    }
+  }
+});
+
+// 📺 Add Series - 3 Step Flow (Category Selection → Poster → Overview → Video)
 bot.action('admin_addseries', (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
   ctx.answerCbQuery();
 
   ctx.editMessageText(
-    '📺 *TV Show အသစ်ထည့်ရန်*\n\nအောက်ပါပုံစံဖြင့်ပို့ပါ:\n\n`/addseries အမျိုးအစား | အမည် | နှစ် | Rating | Status | ဖော်ပြချက်`\n\nဥပမာ:\n`/addseries korean | Sweet Home 3 | 2025 | 7.5 | Now Airing | Monster တွေနဲ့ ရင်ဆိုင်တဲ့သူ`\n\nအမျိုးအစားများ: trending, korean, anime, western',
+    '📺 <b>TV Show အသစ်ထည့်ရန် - အမျိုးအစား ရွေးပါ</b>\n\nအောက်ပါ အမျိုးအစားတွေထဲက တစ်ခုရွေးပါ။\nရွေးပြီးရင် Poster ပို့ဖို့ ပြောပေးမှာပါ။\n\n📌 အဆင့် ၃ ဆင့်ရှိပါတယ်:\n၁။ အမျိုးအစား → Poster ပုံ (Caption မှာ အမည်ရိုက်ပါ)\n၂။ Overview/ဖော်ပြချက်\n၃။ Video File',
     {
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+        [Markup.button.callback('🔥 Trending', 'series_cat_trending'), Markup.button.callback('🇰🇷 Korean', 'series_cat_korean')],
+        [Markup.button.callback('🇯🇵 Anime', 'series_cat_anime'), Markup.button.callback('🇺🇸 Western', 'series_cat_western')],
+        [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addseries'), Markup.button.callback('🔙 Admin Panel', 'admin_back')]
       ])
     }
   );
 });
+
+// Series Category Selection Callbacks
+const seriesCategoryMap = {
+  series_cat_trending: 'trending',
+  series_cat_korean: 'korean',
+  series_cat_anime: 'anime',
+  series_cat_western: 'western'
+};
+
+const seriesCategoryLabels = {
+  trending: '🔥 Trending',
+  korean: '🇰🇷 Korean',
+  anime: '🇯🇵 Anime',
+  western: '🇺🇸 Western'
+};
+
+for (const [actionId, category] of Object.entries(seriesCategoryMap)) {
+  bot.action(actionId, async (ctx) => {
+    if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
+    ctx.answerCbQuery();
+
+    const adminId = ctx.from.id;
+    addSeriesState[adminId] = { step: 1, waitingTitle: false, category: category, poster_file_id: '', title: '', overview: '' };
+    console.log('📺 Add series session created for admin', adminId, '| category:', category, '| Sessions:', Object.keys(addSeriesState));
+    await saveSeriesSessionToDB(adminId);
+
+    const catLabel = seriesCategoryLabels[category] || category;
+    ctx.editMessageText(
+      `📺 <b>TV Show အသစ်ထည့်ရန် - အဆင့် ၁/၃</b>\n\n📂 အမျိုးအစား: ${catLabel}\n\n🖼️ <b>TV Show Poster ပို့ပါ</b>\n\nPoster ပုံကို ဒီ Chat ထဲမှာ ပို့ပါ။\n📌 အမည်ကို Poster Caption မှာရိုက်ပါ!\n\n💡 Caption မပါရင် နောက်မှ အမည်မေးပါမယ်`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addseries')],
+          [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+        ])
+      }
+    );
+  });
+}
 
 // 📂 Movie List (Admin Panel Button)
 bot.action('admin_listmovies', async (ctx) => {
@@ -1405,17 +1882,18 @@ bot.action('admin_back', async (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
   ctx.answerCbQuery();
 
-  let totalUsers = 0, subscribedUsers = 0, movieCount = 0;
+  let totalUsers = 0, subscribedUsers = 0, movieCount = 0, seriesCount = 0;
   if (dbConnected) {
     try {
       totalUsers = await User.countDocuments();
       subscribedUsers = await User.countDocuments({ subscribed: true });
       movieCount = await Movie.countDocuments();
+      seriesCount = await Series.countDocuments();
     } catch (err) { console.error('admin_back error:', err.message); }
   }
 
   ctx.editMessageText(
-    `🛡️ *Admin Panel*\n\n👥 Users: ${totalUsers}\n🔔 Subscribed: ${subscribedUsers}\n🎬 Movies: ${movieCount} (Limit မရှိ)`,
+    `🛡️ *Admin Panel*\n\n👥 Users: ${totalUsers}\n🔔 Subscribed: ${subscribedUsers}\n🎬 Movies: ${movieCount} (Limit မရှိ)\n📺 Series: ${seriesCount} (Limit မရှိ)`,
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
@@ -1433,7 +1911,11 @@ bot.action('admin_back', async (ctx) => {
         ],
         [
           Markup.button.callback('📺 Add Series', 'admin_addseries'),
-          Markup.button.callback('🗑️ Delete Movie', 'admin_deletemovie')
+          Markup.button.callback('📂 Series List', 'admin_listseries')
+        ],
+        [
+          Markup.button.callback('🗑️ Delete Movie', 'admin_deletemovie'),
+          Markup.button.callback('🗑️ Delete Series', 'admin_deleteseries')
         ]
       ])
     }
@@ -1622,6 +2104,90 @@ bot.command('deletemovie', async (ctx) => {
   );
 });
 
+// 📂 Series List (Admin Panel Button)
+bot.action('admin_listseries', async (ctx) => {
+  if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
+  ctx.answerCbQuery();
+
+  let series = [];
+  if (dbConnected) {
+    try { series = await Series.find().sort({ addedAt: -1 }); } catch (err) { console.error('listseries error:', err.message); }
+  }
+
+  if (series.length === 0) {
+    ctx.editMessageText(
+      '📂 *တင်ထားသော TV Shows များ မရှိသေးပါ*\n\n📺 Add Series နှိပ်ပြီး TV Show အသစ်တင်ပါ',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('📺 Add Series', 'admin_addseries')],
+          [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+        ])
+      }
+    );
+    return;
+  }
+
+  let listText = `📂 *တင်ထားသော TV Shows (${series.length})*\n\n`;
+  series.forEach((s, i) => {
+    const catLabel = seriesCategoryLabels[s.category] || s.category;
+    const hasPoster = s.poster_file_id ? '🖼️' : '❌';
+    const hasVideo = s.video_file_id ? '🎬' : '⏭️';
+    const addedDate = s.addedAt ? new Date(s.addedAt).toLocaleDateString() : '';
+    listText += `${i + 1}. *${s.title}*\n   ${hasPoster} Poster | 📂 ${catLabel} | ${hasVideo} Video | 📅 ${addedDate}\n`;
+  });
+  listText += '\n💡 ဖျက်ချင်ရင်: /deleteseries အမှတ်စဉ်';
+
+  ctx.editMessageText(listText, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('📺 Add Series', 'admin_addseries')],
+      [Markup.button.callback('🗑️ Delete Series', 'admin_deleteseries')],
+      [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+    ])
+  });
+});
+
+// 🗑️ Delete Series (Admin Panel Button)
+bot.action('admin_deleteseries', async (ctx) => {
+  if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
+  ctx.answerCbQuery();
+
+  let series = [];
+  if (dbConnected) {
+    try { series = await Series.find().sort({ addedAt: 1 }); } catch (err) { console.error('deleteseries list error:', err.message); }
+  }
+
+  if (series.length === 0) {
+    ctx.editMessageText(
+      '📂 *ဖျက်ရန် TV Shows မရှိပါ*\n\nTV Show အသစ်တင်ရန် Add Series နှိပ်ပါ',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('📺 Add Series', 'admin_addseries')],
+          [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+        ])
+      }
+    );
+    return;
+  }
+
+  let listText = `🗑️ *ဖျက်ရန် TV Show ရွေးချယ်ပါ*\n\nTV Show စာရင်း:\n\n`;
+  series.forEach((s, i) => {
+    const catLabel = seriesCategoryLabels[s.category] || s.category;
+    listText += `${i + 1}. ${s.title} (${catLabel})\n`;
+  });
+  listText += '\n💡 ဖျက်ချင်ရင်: /deleteseries အမှတ်စဉ်';
+
+  ctx.editMessageText(listText, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('📺 Add Series', 'admin_addseries')],
+      [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+    ])
+  });
+});
+
 // /addmovie command - 3 Step Flow
 bot.command('addmovie', async (ctx) => {
   if (!isAdmin(ctx)) {
@@ -1723,38 +2289,113 @@ bot.action('db_reconnect', async (ctx) => {
   }
 });
 
-// /addseries command
-bot.command('addseries', (ctx) => {
+// /addseries command - 3 Step Flow (same as Admin Panel button)
+bot.command('addseries', async (ctx) => {
   if (!isAdmin(ctx)) {
     logUnauthorizedAccess(ctx, '/addseries');
     ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
     return;
   }
 
-  const args = ctx.message.text.replace('/addseries', '').trim();
-  const parts = args.split('|').map(p => p.trim());
+  ctx.reply(
+    '📺 <b>TV Show အသစ်ထည့်ရန် - အမျိုးအစား ရွေးပါ</b>\n\nအောက်ပါ အမျိုးအစားတွေထဲက တစ်ခုရွေးပါ။',
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔥 Trending', 'series_cat_trending'), Markup.button.callback('🇰🇷 Korean', 'series_cat_korean')],
+        [Markup.button.callback('🇯🇵 Anime', 'series_cat_anime'), Markup.button.callback('🇺🇸 Western', 'series_cat_western')],
+        [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addseries')]
+      ])
+    }
+  );
+});
 
-  if (parts.length < 6) {
-    ctx.reply('📺 Format:\n`/addseries အမျိုးအစား | အမည် | နှစ် | Rating | Status | ဖော်ပြချက်`', { parse_mode: 'Markdown' });
+// /listseries command - Admin အတွက် Series စာရင်းကြည့်ရန်
+bot.command('listseries', async (ctx) => {
+  if (!isAdmin(ctx)) {
+    ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
     return;
   }
 
-  const [category, title, year, rating, status, desc] = parts;
+  let series = [];
+  if (dbConnected) {
+    try { series = await Series.find().sort({ addedAt: -1 }); } catch (err) { console.error('listseries error:', err.message); }
+  }
 
-  if (!seriesDB[category]) {
-    ctx.reply(`❌ အမျိုးအစား "${category}" မရှိပါ။\nရနိုင်သည်: trending, korean, anime, western`);
+  if (series.length === 0) {
+    ctx.reply(
+      '📂 *တင်ထားသော TV Shows များ မရှိသေးပါ*\n\n📺 Add Series နှိပ်ပြီး TV Show အသစ်တင်ပါ',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('📺 Add Series', 'admin_addseries')],
+          [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+        ])
+      }
+    );
     return;
   }
 
-  seriesDB[category].unshift({
-    title: title,
-    year: parseInt(year) || 2024,
-    rating: rating,
-    status: status,
-    desc: desc
+  let listText = `📂 *တင်ထားသော TV Shows (${series.length})*\n\n`;
+  series.forEach((s, i) => {
+    const catLabel = seriesCategoryLabels[s.category] || s.category;
+    const hasPoster = s.poster_file_id ? '🖼️' : '❌';
+    const hasVideo = s.video_file_id ? '🎬' : '⏭️';
+    listText += `${i + 1}. *${s.title}*\n   ${hasPoster} Poster | 📂 ${catLabel} | ${hasVideo} Video\n`;
   });
+  listText += '\n💡 ဖျက်ချင်ရင်: /deleteseries အမှတ်စဉ်';
 
-  ctx.reply(`✅ TV Show အသစ်ထည့်ပြီး!\n\n📺 ${title}\n📂 ${category}\n⭐ ${rating}\n📊 ${status}\n📅 ${year}`);
+  ctx.reply(listText, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('📺 Add Series', 'admin_addseries')],
+      [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+    ])
+  });
+});
+
+// /deleteseries command - Admin အတွက် Series ဖျက်ရန်
+bot.command('deleteseries', async (ctx) => {
+  if (!isAdmin(ctx)) {
+    ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
+    return;
+  }
+
+  const args = ctx.message.text.replace('/deleteseries', '').trim();
+  const index = parseInt(args) - 1;
+
+  if (isNaN(index) || index < 0) {
+    ctx.reply(
+      '❌ *TV Show ဖျက်ရန် အမှတ်စဉ်ထည့်ပါ*\n\nဥပမာ:\n`/deleteseries 1`\n\nTV Show စာရင်းကြည့်ရန်: /listseries',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  if (!dbConnected) {
+    ctx.reply('❌ MongoDB ချိတ်ဆက်မှု မရှိပါ');
+    return;
+  }
+
+  try {
+    const series = await Series.find().sort({ addedAt: 1 });
+    if (index >= series.length) {
+      ctx.reply(`❌ အမှတ်စဉ် ${index + 1} မရှိပါ။ စုစုပေါင်း ${series.length} ခုသာ ရှိပါသည်။ /listseries`);
+      return;
+    }
+
+    const deletedSeries = series[index];
+    await Series.deleteOne({ _id: deletedSeries._id });
+    const remaining = await Series.countDocuments();
+
+    ctx.reply(
+      `✅ *TV Show ဖျက်ပြီးပါပြီ!*\n\n📺 ${deletedSeries.title}\n\n📝 ကျန်ရှိသေးသော: ${remaining} ခု`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    console.error('deleteseries error:', err.message);
+    ctx.reply('❌ ဖျက်ရာတွင် အမှားဖြစ်ပါသည်');
+  }
 });
 
 // ============================================
@@ -1902,7 +2543,7 @@ bot.command('search', async (ctx) => {
     }
   }
 
-  // Built-in seriesDB ထဲမှာရှာမယ်
+  // Built-in seriesDB + MongoDB Series ထဲမှာရှာမယ်
   const seriesResults = [];
   for (const [cat, shows] of Object.entries(seriesDB)) {
     for (const show of shows) {
@@ -1912,7 +2553,20 @@ bot.command('search', async (ctx) => {
     }
   }
 
-  console.log(`🔍 Results: Admin=${adminMovieResults.length}, Movies=${movieResults.length}, Series=${seriesResults.length}`);
+  // MongoDB Series ထဲမှာလည်းရှာမယ်
+  let adminSeriesResults = [];
+  if (dbConnected) {
+    try {
+      adminSeriesResults = await Series.find({
+        $or: [
+          { title: { $regex: escapedQuery, $options: 'i' } },
+          { overview: { $regex: escapedQuery, $options: 'i' } }
+        ]
+      }).limit(5);
+    } catch (err) { console.error('Series search error:', err.message); }
+  }
+
+  console.log(`🔍 Results: Admin Movies=${adminMovieResults.length}, Movies=${movieResults.length}, Series=${seriesResults.length}, Admin Series=${adminSeriesResults.length}`);
 
   // Admin Movie ရှာတွေ့ရင် - HTML parse_mode နဲ့ပြမယ် (Safe!)
   if (adminMovieResults.length > 0) {
@@ -1921,8 +2575,15 @@ bot.command('search', async (ctx) => {
     }
   }
 
+  // Admin Series ရှာတွေ့ရင် - HTML parse_mode နဲ့ပြမယ်
+  if (adminSeriesResults.length > 0) {
+    for (const series of adminSeriesResults.slice(0, 3)) {
+      await displayAdminSeries(ctx, series);
+    }
+  }
+
   // ဘာမှမရှာတွေ့ရင်
-  if (movieResults.length === 0 && seriesResults.length === 0 && adminMovieResults.length === 0) {
+  if (movieResults.length === 0 && seriesResults.length === 0 && adminMovieResults.length === 0 && adminSeriesResults.length === 0) {
     let adminMovieCount = 0;
     if (dbConnected) { try { adminMovieCount = await Movie.countDocuments(); } catch(e) {} }
     let hint = '';
@@ -2239,10 +2900,45 @@ const seriesCategories = {
 };
 
 for (const [actionId, catInfo] of Object.entries(seriesCategories)) {
-  bot.action(actionId, (ctx) => {
+  bot.action(actionId, async (ctx) => {
     ctx.answerCbQuery();
-    const shows = seriesDB[catInfo.key];
-    const text = `${catInfo.label} *TV Shows*\n\n${formatList(shows, catInfo.emoji)}\n\n📌 ပိုမိုကြည့်ရှုလိုပါက Kumastream App တွင် ဝင်ရောက်ကြည့်ရှုပါ`;
+    // Built-in seriesDB + MongoDB Series တွေ ပေါင်းပြမယ်
+    let allShows = [...(seriesDB[catInfo.key] || [])];
+
+    if (dbConnected) {
+      try {
+        const dbSeries = await Series.find({ category: catInfo.key }).sort({ addedAt: -1 });
+        for (const s of dbSeries) {
+          allShows.push({
+            title: s.title,
+            year: s.year || new Date(s.addedAt).getFullYear(),
+            rating: s.rating || '-',
+            status: s.status || '',
+            desc: s.overview_text || s.overview || '',
+            _id: s._id,
+            poster_file_id: s.poster_file_id,
+            video_file_id: s.video_file_id,
+            fromDB: true
+          });
+        }
+      } catch (err) { console.error('Series category query error:', err.message); }
+    }
+
+    if (allShows.length === 0) {
+      ctx.editMessageText(
+        `${catInfo.label} *TV Shows*\n\n📂 ရလဒ်များ မရှိသေးပါ`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔙 TV Shows အမျိုးအစား', 'series')],
+            [Markup.button.callback('🏠 ပင်မမီနူး', 'back_menu')]
+          ])
+        }
+      );
+      return;
+    }
+
+    const text = `${catInfo.label} *TV Shows (${allShows.length})*\n\n${formatList(allShows.slice(0, 15), catInfo.emoji)}\n\n📌 ပိုမိုကြည့်ရှုလိုပါက Kumastream App တွင် ဝင်ရောက်ကြည့်ရှုပါ`;
 
     ctx.editMessageText(text, {
       parse_mode: 'Markdown',
@@ -2543,4 +3239,5 @@ startBot();
 // Graceful shutdown
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
