@@ -34,8 +34,69 @@ const WEB_URL = process.env.WEB_URL || '';
 // ============================================
 // ADMIN MOVIE ADDING STATE + SEARCH STATE
 // ============================================
-const addMovieState = {}; // { adminId: { step: 1|2|3, waitingTitle: false, poster_file_id: '', title: '', overview: '' } }
+const addMovieState = {}; // In-memory cache (fast) - backed up to MongoDB
 const searchState = {};  // { userId: true }
+
+// ============================================
+// SESSION HELPER: MongoDB-backed session persistence
+// Railway restart ဖြစ်ရင်လည်း session မပျောက်အောင် MongoDB မှာ backup သိမ်းမယ်
+// ============================================
+async function saveSessionToDB(adminId) {
+  if (!dbConnected) return;
+  try {
+    const state = addMovieState[adminId];
+    if (state) {
+      await AddMovieSession.findOneAndUpdate(
+        { adminId: String(adminId) },
+        { adminId: String(adminId), step: state.step, waitingTitle: state.waitingTitle, poster_file_id: state.poster_file_id, title: state.title, overview: state.overview, createdAt: new Date() },
+        { upsert: true }
+      );
+      console.log(`💾 Session saved to DB: admin=${adminId}, step=${state.step}, title="${state.title}"`);
+    }
+  } catch (err) {
+    console.error('saveSessionToDB error:', err.message);
+  }
+}
+
+async function loadSessionFromDB(adminId) {
+  if (!dbConnected) return null;
+  try {
+    const session = await AddMovieSession.findOne({ adminId: String(adminId) });
+    if (session) {
+      addMovieState[adminId] = {
+        step: session.step,
+        waitingTitle: session.waitingTitle || false,
+        poster_file_id: session.poster_file_id || '',
+        title: session.title || '',
+        overview: session.overview || ''
+      };
+      console.log(`📂 Session loaded from DB: admin=${adminId}, step=${session.step}, title="${session.title}"`);
+      return addMovieState[adminId];
+    }
+  } catch (err) {
+    console.error('loadSessionFromDB error:', err.message);
+  }
+  return null;
+}
+
+async function deleteSessionFromDB(adminId) {
+  if (!dbConnected) return;
+  try {
+    await AddMovieSession.deleteOne({ adminId: String(adminId) });
+    console.log(`🗑️ Session deleted from DB: admin=${adminId}`);
+  } catch (err) {
+    console.error('deleteSessionFromDB error:', err.message);
+  }
+}
+
+// Helper: Get session (memory first, then MongoDB fallback)
+async function getAddMovieSession(adminId) {
+  let state = addMovieState[adminId];
+  if (!state) {
+    state = await loadSessionFromDB(adminId);
+  }
+  return state;
+}
 
 // ============================================
 // MONGOOSE SCHEMAS
@@ -81,6 +142,20 @@ const notificationSchema = new mongoose.Schema({
   type: String
 });
 const Notification = mongoose.model('Notification', notificationSchema);
+
+// Add Movie Session Schema (persists across Railway restarts!)
+const addMovieSessionSchema = new mongoose.Schema({
+  adminId: { type: String, required: true, unique: true },
+  step: { type: Number, default: 1 },
+  waitingTitle: { type: Boolean, default: false },
+  poster_file_id: { type: String, default: '' },
+  title: { type: String, default: '' },
+  overview: { type: String, default: '' },
+  createdAt: { type: Date, default: Date.now }
+});
+// TTL index: auto-delete sessions after 30 minutes
+addMovieSessionSchema.index({ createdAt: 1 }, { expireAfterSeconds: 1800 });
+const AddMovieSession = mongoose.model('AddMovieSession', addMovieSessionSchema);
 
 // ============================================
 // MONGODB CONNECTION
@@ -162,6 +237,20 @@ function escapeHtml(text) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// Helper: Normalize full-width characters to ASCII
+function normalizeQuery(query) {
+  return query
+    .replace(/[\uff01-\uff5e]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/\u3000/g, ' ')
+    .replace(/（/g, '(').replace(/）/g, ')')
+    .trim();
+}
+
+// Helper: Strip year from query like "(2007)" for fallback search
+function stripYear(query) {
+  return query.replace(/\s*\(\d{4}\)\s*/g, '').trim();
 }
 
 // ============================================
@@ -404,7 +493,7 @@ bot.use(async (ctx, next) => {
   // Step 3: Video File
   // ============================================
   const adminId = ctx.from ? ctx.from.id : 0;
-  const state = addMovieState[adminId];
+  const state = await getAddMovieSession(adminId);
 
   if (state && isAdmin(ctx)) {
 
@@ -420,11 +509,14 @@ bot.use(async (ctx, next) => {
         // Caption ပါရင် → ရုပ်ရှင်အမည် ရယူပြီး Step 2 (Overview) ကိုသွားမယ်
         state.title = caption;
         state.step = 2;
+        console.log('📊 Step changed to', state.step, 'for admin', adminId);
+        await saveSessionToDB(adminId);
 
+        const safeTitle = escapeHtml(state.title);
         await ctx.reply(
-          `✅ Poster + ရုပ်ရှင်အမည် လက်ခံရရှိပါပြီး!\n\n🖼️ Poster ✅\n🎬 အမည်: ${state.title}\n\n📝 *အဆင့် ၂/၃: Overview/ဖော်ပြချက် ရေးပါ*\n\nဇတ်ကားအကြောင်း အသေးစိတ်ဖော်ပြချက်ကို ရေးပါ။\n\nဥပမာ:\nဒီဇတ်ကားက Sci-Fi Animation တစ်ကားဖြစ်ပြီး...`,
+          `✅ Poster + ရုပ်ရှင်အမည် လက်ခံရရှိပါပြီး!\n\n🖼️ Poster ✅\n🎬 အမည်: <b>${safeTitle}</b>\n\n📝 <b>အဆင့် ၂/၃: Overview/ဖော်ပြချက် ရေးပါ</b>\n\nဇတ်ကားအကြောင်း အသေးစိတ်ဖော်ပြချက်ကို ရေးပါ။\n\nဥပမာ:\nဒီဇတ်ကားက Sci-Fi Animation တစ်ကားဖြစ်ပြီး...`,
           {
-            parse_mode: 'Markdown',
+            parse_mode: 'HTML',
             ...Markup.inlineKeyboard([
               [Markup.button.callback('⏭️ Overview မပါ', 'skip_overview')],
               [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
@@ -434,11 +526,12 @@ bot.use(async (ctx, next) => {
       } else {
         // Caption မပါရင် → ရုပ်ရှင်အမည် သီးသန့်မေးမယ်
         state.waitingTitle = true;
+        await saveSessionToDB(adminId);
 
         await ctx.reply(
-          '✅ Poster လက်ခံရရှိပါပြီး!\n\n📝 *ရုပ်ရှင်အမည် ရိုက်ပါ*\n\nရုပ်ရှင်အမည်ကို သီးသန့်ရိုက်ပါ။\nဒီအမည်နဲ့ User တွေက /search မှာ ရှာလို့ရမှာပါ။\n\nဥပမာ:\nAppleseed Ex Machina (2007)\nAvengers: Endgame\nSquid Game Season 2',
+          '✅ Poster လက်ခံရရှိပါပြီး!\n\n📝 <b>ရုပ်ရှင်အမည် ရိုက်ပါ</b>\n\nရုပ်ရှင်အမည်ကို သီးသန့်ရိုက်ပါ။\nဒီအမည်နဲ့ User တွေက /search မှာ ရှာလို့ရမှာပါ။\n\nဥပမာ:\nAppleseed Ex Machina (2007)\nAvengers: Endgame\nSquid Game Season 2',
           {
-            parse_mode: 'Markdown',
+            parse_mode: 'HTML',
             ...Markup.inlineKeyboard([
               [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
             ])
@@ -453,11 +546,14 @@ bot.use(async (ctx, next) => {
       state.title = ctx.message.text.trim();
       state.waitingTitle = false;
       state.step = 2;
+      console.log('📊 Step changed to', state.step, 'for admin', adminId);
+      await saveSessionToDB(adminId);
 
+      const safeTitle = escapeHtml(state.title);
       await ctx.reply(
-        `✅ ရုပ်ရှင်အမည်: ${state.title}\n\n📝 *အဆင့် ₂/₃: Overview/ဖော်ပြချက် ရေးပါ*\n\nဇတ်ကားအကြောင်း အသေးစိတ်ဖော်ပြချက်ကို ရေးပါ။`,
+        `✅ ရုပ်ရှင်အမည်: <b>${safeTitle}</b>\n\n📝 <b>အဆင့် ₂/₃: Overview/ဖော်ပြချက် ရေးပါ</b>\n\nဇတ်ကားအကြောင်း အသေးစိတ်ဖော်ပြချက်ကို ရေးပါ။`,
         {
-          parse_mode: 'Markdown',
+          parse_mode: 'HTML',
           ...Markup.inlineKeyboard([
             [Markup.button.callback('⏭️ Overview မပါ', 'skip_overview')],
             [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
@@ -471,11 +567,13 @@ bot.use(async (ctx, next) => {
     if (state.step === 2 && ctx.message && ctx.message.text && !ctx.message.text.startsWith('/')) {
       state.overview = ctx.message.text;
       state.step = 3;
+      console.log('📊 Step changed to', state.step, 'for admin', adminId);
+      await saveSessionToDB(adminId);
 
       await ctx.reply(
-        '✅ Overview လက်ခံရရှိပါပြီး!\n\n🎬 *အဆင့် ၃/၃: Video File ပို့ပါ*\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။\nVideo ပို့ပြီးရင် ဇတ်ကားအသစ် သိမ်းဆည်းသွားပါမယ်။',
+        '✅ Overview လက်ခံရရှိပါပြီး!\n\n🎬 <b>အဆင့် ၃/၃: Video File ပို့ပါ</b>\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။\n📌 Channel ကနေ Forward လုပ်တာလည်း လက်ခံပါတယ်။\nVideo ပို့ပြီးရင် ဇတ်ကားအသစ် သိမ်းဆည်းသွားပါမယ်။',
         {
-          parse_mode: 'Markdown',
+          parse_mode: 'HTML',
           ...Markup.inlineKeyboard([
             [Markup.button.callback('⏭️ Video မပါ', 'skip_video')],
             [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
@@ -486,27 +584,51 @@ bot.use(async (ctx, next) => {
     }
 
     // STEP 3: Video File လက်ခံခြင်း
-    if (state.step === 3 && ctx.message && (ctx.message.video || ctx.message.document)) {
-      const videoFileId = ctx.message.video ? ctx.message.video.file_id : ctx.message.document.file_id;
+    const isVideo = ctx.message && (ctx.message.video || ctx.message.document || ctx.message.animation);
+    if (state.step === 3 && isVideo) {
+      try {
+        let videoFileId = '';
+        let videoType = 'unknown';
+        if (ctx.message.video) {
+          videoFileId = ctx.message.video.file_id;
+          videoType = 'video';
+        } else if (ctx.message.document) {
+          videoFileId = ctx.message.document.file_id;
+          videoType = 'document';
+        } else if (ctx.message.animation) {
+          videoFileId = ctx.message.animation.file_id;
+          videoType = 'animation';
+        }
+        console.log('🎬 Step 3 video received: type=', videoType);
 
-      const newMovie = await Movie.create({
-        title: state.title || 'Unknown Movie',
-        poster_file_id: state.poster_file_id,
-        overview: state.overview || '',
-        overview_text: state.overview || '',
-        video_file_id: videoFileId,
-        addedBy: ctx.from.first_name
-      });
+        const newMovie = await Movie.create({
+          title: state.title || 'Unknown Movie',
+          poster_file_id: state.poster_file_id,
+          overview: state.overview || '',
+          overview_text: state.overview || '',
+          video_file_id: videoFileId,
+          addedBy: ctx.from.first_name
+        });
 
-      const totalMovies = await Movie.countDocuments();
-      console.log(`✅ New movie added: "${newMovie.title}" | Total: ${totalMovies}`);
+        const totalMovies = await Movie.countDocuments();
+        console.log(`✅ New movie added: "${newMovie.title}" | Total: ${totalMovies}`);
 
-      delete addMovieState[adminId];
+        delete addMovieState[adminId];
+        await deleteSessionFromDB(adminId);
 
-      await ctx.reply(
-        `✅ *ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ!*\n\n🎬 အမည်: ${newMovie.title}\n🖼️ Poster ✅\n📝 Overview ✅\n🎬 Video ✅\n\n🔍 User တွေက /search ${newMovie.title} နဲ့ ရှာလို့ရပါပြီ`,
-        { parse_mode: 'Markdown' }
-      );
+        const safeTitle = escapeHtml(newMovie.title);
+        await ctx.reply(
+          `✅ <b>ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ!</b>\n\n🎬 အမည်: <b>${safeTitle}</b>\n🖼️ Poster ✅\n📝 Overview ✅\n🎬 Video ✅\n\n🔍 User တွေက /search ${safeTitle} နဲ့ ရှာလို့ရပါပြီ`,
+          { parse_mode: 'HTML' }
+        );
+      } catch (err) {
+        console.error('❌ Step 3 video save error:', err.message);
+        try {
+          await ctx.reply(`❌ Video သိမ်းဆည်းမှု အမှား! ${escapeHtml(err.message)}`, { parse_mode: 'HTML' });
+        } catch (err2) {
+          console.error('❌ Error reply also failed:', err2.message);
+        }
+      }
       return;
     }
   }
@@ -945,16 +1067,18 @@ bot.action('admin_notify', (ctx) => {
 });
 
 // 🎬 Add Movie - 3 Step Flow (NEW!)
-bot.action('admin_addmovie', (ctx) => {
+bot.action('admin_addmovie', async (ctx) => {
   if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
   ctx.answerCbQuery();
 
   addMovieState[ctx.from.id] = { step: 1, waitingTitle: false, poster_file_id: '', title: '', overview: '' };
+  console.log('🎬 Add movie session created for admin', ctx.from.id);
+  await saveSessionToDB(ctx.from.id);
 
   ctx.editMessageText(
-    '🎬 *ရုပ်ရှင်အသစ်ထည့်ရန် - အဆင့် ၁/၃*\n\n🖼️ *Movie Poster ပို့ပါ*\n\nရုပ်ရှင် Poster ပုံကို ဒီ Chat ထဲမှာ ပို့ပါ။\n📌 ရုပ်ရှင်အမည်ကို Poster Caption မှာရိုက်ပါ!\n\n📌 အဆင့် ၃ ဆင့်ရှိပါတယ်:\n၁။ Poster ပုံ (Caption မှာ ရုပ်ရှင်အမည်ရိုက်ပါ)\n၂။ Overview/ဖော်ပြချက်\n၃။ Video File\n\n💡 Caption မပါရင် နောက်မှ အမည်မေးပါမယ်',
+    '🎬 <b>ရုပ်ရှင်အသစ်ထည့်ရန် - အဆင့် ၁/၃</b>\n\n🖼️ <b>Movie Poster ပို့ပါ</b>\n\nရုပ်ရှင် Poster ပုံကို ဒီ Chat ထဲမှာ ပို့ပါ။\n📌 ရုပ်ရှင်အမည်ကို Poster Caption မှာရိုက်ပါ!\n\n📌 အဆင့် ၃ ဆင့်ရှိပါတယ်:\n၁။ Poster ပုံ (Caption မှာ ရုပ်ရှင်အမည်ရိုက်ပါ)\n၂။ Overview/ဖော်ပြချက်\n၃။ Video File\n\n💡 Caption မပါရင် နောက်မှ အမည်မေးပါမယ်',
     {
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')],
         [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
@@ -964,11 +1088,12 @@ bot.action('admin_addmovie', (ctx) => {
 });
 
 // ❌ Cancel Add Movie
-bot.action('cancel_addmovie', (ctx) => {
+bot.action('cancel_addmovie', async (ctx) => {
   ctx.answerCbQuery();
   if (addMovieState[ctx.from.id]) {
     delete addMovieState[ctx.from.id];
   }
+  await deleteSessionFromDB(ctx.from.id);
   ctx.editMessageText('❌ ရုပ်ရှင်ထည့်ခြင်း ပယ်ဖျက်ပြီးပါပြီ', {
     parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([
@@ -983,20 +1108,24 @@ bot.action('skip_overview', async (ctx) => {
   ctx.answerCbQuery();
 
   const adminId = ctx.from.id;
-  const state = addMovieState[adminId];
+  const state = await getAddMovieSession(adminId);
 
   if (!state) {
+    console.log('⚠️ Session not found for admin', adminId);
     ctx.editMessageText('❌ Session မရှိပါ။ /addmovie ကိုပြန်စပါ');
     return;
   }
 
   state.overview = '';
   state.step = 3; // သွားတော့ Step 3 (Video)
+  console.log('📊 Step changed to', state.step, 'for admin', adminId);
+  await saveSessionToDB(adminId);
 
+  const safeTitle = escapeHtml(state.title);
   await ctx.editMessageText(
-    `✅ ရုပ်ရှင်အမည်: ${state.title}\n📝 Overview: ⏭️ ချန်လှပ်\n\n🎬 *အဆင့် ၃/၃: Video File ပို့ပါ*\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။`,
+    `✅ ရုပ်ရှင်အမည်: <b>${safeTitle}</b>\n📝 Overview: ⏭️ ချန်လှပ်\n\n🎬 <b>အဆင့် ၃/၃: Video File ပို့ပါ</b>\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။`,
     {
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('⏭️ Video မပါ', 'skip_video')],
         [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
@@ -1011,9 +1140,10 @@ bot.action('skip_video', async (ctx) => {
   ctx.answerCbQuery();
 
   const adminId = ctx.from.id;
-  const state = addMovieState[adminId];
+  const state = await getAddMovieSession(adminId);
 
   if (!state) {
+    console.log('⚠️ Session not found for admin', adminId);
     ctx.editMessageText('❌ Session မရှိပါ။ /addmovie ကိုပြန်စပါ');
     return;
   }
@@ -1031,10 +1161,13 @@ bot.action('skip_video', async (ctx) => {
   console.log(`✅ New movie added (no video): "${newMovie.title}" | Total: ${totalMovies}`);
 
   delete addMovieState[adminId];
+  await deleteSessionFromDB(adminId);
 
+  const safeTitle = escapeHtml(newMovie.title);
+  const safeOverview = newMovie.overview ? '✅' : '⏭️ ချန်လှပ်';
   await ctx.editMessageText(
-    `✅ *ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ! (Video မပါ)*\n\n🎬 အမည်: ${newMovie.title}\n🖼️ Poster ✅\n📝 Overview ${newMovie.overview ? '✅' : '⏭️ ချန်လှပ်'}\n🎬 Video ⏭️ ချန်လှပ်\n\n🔍 User တွေက /search ${newMovie.title} နဲ့ ရှာလို့ရပါပြီ`,
-    { parse_mode: 'Markdown' }
+    `✅ <b>ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ! (Video မပါ)</b>\n\n🎬 အမည်: <b>${safeTitle}</b>\n🖼️ Poster ✅\n📝 Overview ${safeOverview}\n🎬 Video ⏭️ ချန်လှပ်\n\n🔍 User တွေက /search ${safeTitle} နဲ့ ရှာလို့ရပါပြီ`,
+    { parse_mode: 'HTML' }
   );
 });
 
@@ -1364,7 +1497,7 @@ bot.command('deletemovie', async (ctx) => {
 });
 
 // /addmovie command - 3 Step Flow
-bot.command('addmovie', (ctx) => {
+bot.command('addmovie', async (ctx) => {
   if (!isAdmin(ctx)) {
     logUnauthorizedAccess(ctx, '/addmovie');
     ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
@@ -1372,11 +1505,13 @@ bot.command('addmovie', (ctx) => {
   }
 
   addMovieState[ctx.from.id] = { step: 1, waitingTitle: false, poster_file_id: '', title: '', overview: '' };
+  console.log('🎬 Add movie session created for admin', ctx.from.id);
+  await saveSessionToDB(ctx.from.id);
 
   ctx.reply(
-    '🎬 *ရုပ်ရှင်အသစ်ထည့်ရန် - အဆင့် ၁/၃*\n\n🖼️ *Movie Poster ပို့ပါ*\n\nရုပ်ရှင် Poster ပုံကို ဒီ Chat ထဲမှာ ပို့ပါ။\n📌 ရုပ်ရှင်အမည်ကို Poster Caption မှာရိုက်ပါ!\n\n📌 အဆင့် ၃ ဆင့်ရှိပါတယ်:\n၁။ Poster ပုံ (Caption မှာ ရုပ်ရှင်အမည်ရိုက်ပါ)\n၂။ Overview/ဖော်ပြချက်\n၃။ Video File\n\n💡 Caption မပါရင် နောက်မှ အမည်မေးပါမယ်',
+    '🎬 <b>ရုပ်ရှင်အသစ်ထည့်ရန် - အဆင့် ၁/၃</b>\n\n🖼️ <b>Movie Poster ပို့ပါ</b>\n\nရုပ်ရှင် Poster ပုံကို ဒီ Chat ထဲမှာ ပို့ပါ။\n📌 ရုပ်ရှင်အမည်ကို Poster Caption မှာရိုက်ပါ!\n\n📌 အဆင့် ၃ ဆင့်ရှိပါတယ်:\n၁။ Poster ပုံ (Caption မှာ ရုပ်ရှင်အမည်ရိုက်ပါ)\n၂။ Overview/ဖော်ပြချက်\n၃။ Video File\n\n💡 Caption မပါရင် နောက်မှ အမည်မေးပါမယ်',
     {
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
       ])
@@ -1521,7 +1656,7 @@ bot.command('search', async (ctx) => {
 
   console.log(`🔍 Search query: "${query}" from user ${ctx.from.id}`);
 
-  const queryLower = query.toLowerCase();
+  const queryLower = normalizeQuery(query).toLowerCase();
 
   // Admin Movies ထဲမှာရှာမယ် (MongoDB)
   let adminMovieResults = [];
@@ -1535,6 +1670,22 @@ bot.command('search', async (ctx) => {
         ]
       }).limit(3);
     } catch (err) { console.error('search admin movies error:', err.message); }
+  }
+
+  // Fallback: try without year
+  if (adminMovieResults.length === 0) {
+    const queryNoYear = stripYear(queryLower);
+    if (queryNoYear !== queryLower && queryNoYear.length > 0) {
+      try {
+        adminMovieResults = await Movie.find({
+          $or: [
+            { title: { $regex: queryNoYear, $options: 'i' } },
+            { overview: { $regex: queryNoYear, $options: 'i' } },
+            { overview_text: { $regex: queryNoYear, $options: 'i' } }
+          ]
+        }).limit(3);
+      } catch (err) { console.error('search fallback error:', err.message); }
+    }
   }
 
   // Built-in moviesDB ထဲမှာရှာမယ်
@@ -1625,7 +1776,7 @@ bot.command('search', async (ctx) => {
 bot.on('text', async (ctx, next) => {
   // Admin က Add Movie Step 1b (Title) နဲ့ Step 2 (Overview) မှာဆိုရင် Search မဝင်ပါနဲ့
   const adminId = ctx.from ? ctx.from.id : 0;
-  const addState = addMovieState[adminId];
+  const addState = await getAddMovieSession(adminId);
   if (addState && isAdmin(ctx) && (addState.waitingTitle || addState.step === 2)) {
     return next(); // Add Movie flow ကိုဆက်သွားစေ
   }
@@ -1645,7 +1796,7 @@ bot.on('text', async (ctx, next) => {
 
     console.log(`🔍 Text search: "${query}" from user ${ctx.from.id}`);
 
-    const queryLower = query.toLowerCase();
+    const queryLower = normalizeQuery(query).toLowerCase();
 
     // Admin Movies ထဲမှာရှာမယ် (MongoDB)
     let adminMovieResults = [];
@@ -1659,6 +1810,22 @@ bot.on('text', async (ctx, next) => {
           ]
         }).limit(3);
       } catch (err) { console.error('text search admin movies error:', err.message); }
+    }
+
+    // Fallback: try without year
+    if (adminMovieResults.length === 0) {
+      const queryNoYear = stripYear(queryLower);
+      if (queryNoYear !== queryLower && queryNoYear.length > 0) {
+        try {
+          adminMovieResults = await Movie.find({
+            $or: [
+              { title: { $regex: queryNoYear, $options: 'i' } },
+              { overview: { $regex: queryNoYear, $options: 'i' } },
+              { overview_text: { $regex: queryNoYear, $options: 'i' } }
+            ]
+          }).limit(3);
+        } catch (err) { console.error('text search fallback error:', err.message); }
+      }
     }
 
     // Built-in moviesDB ထဲမှာရှာမယ်
@@ -1743,6 +1910,40 @@ bot.on('text', async (ctx, next) => {
   }
 
   return next();
+});
+
+// Fallback: catch video/document/animation when add movie session is lost
+bot.on(['video', 'document', 'animation'], async (ctx) => {
+  const adminId = ctx.from ? ctx.from.id : 0;
+  const state = await getAddMovieSession(adminId);
+
+  if (state && isAdmin(ctx) && state.step === 3) {
+    // Re-process as step 3 video - the middleware should have caught it but didn't
+    console.log(`🔄 Fallback video handler triggered for admin ${adminId}`);
+    let videoFileId = '';
+    if (ctx.message.video) videoFileId = ctx.message.video.file_id;
+    else if (ctx.message.document) videoFileId = ctx.message.document.file_id;
+    else if (ctx.message.animation) videoFileId = ctx.message.animation.file_id;
+
+    try {
+      const newMovie = await Movie.create({
+        title: state.title || 'Unknown Movie',
+        poster_file_id: state.poster_file_id,
+        overview: state.overview || '',
+        overview_text: state.overview || '',
+        video_file_id: videoFileId,
+        addedBy: ctx.from.first_name
+      });
+      console.log(`✅ Fallback: Movie added "${newMovie.title}"`);
+      delete addMovieState[adminId];
+      await deleteSessionFromDB(adminId);
+      const safeTitle = escapeHtml(newMovie.title);
+      await ctx.reply(`✅ <b>ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ!</b>\n\n🎬 အမည်: <b>${safeTitle}</b>\n🖼️ Poster ✅\n📝 Overview ✅\n🎬 Video ✅\n\n🔍 User တွေက /search ${safeTitle} နဲ့ ရှာလို့ရပါပြီ`, { parse_mode: 'HTML' });
+    } catch (err) {
+      console.error('❌ Fallback video handler error:', err.message);
+      await ctx.reply(`❌ Video သိမ်းဆည်းမှု အမှား! /addmovie နဲ့ ပြန်စပါ။`, { parse_mode: 'HTML' });
+    }
+  }
 });
 
 // ============================================
