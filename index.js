@@ -10,6 +10,12 @@
 const { Telegraf, Markup } = require('telegraf');
 const mongoose = require('mongoose');
 
+// ============================================
+// MONGOOSE: Disable buffering - operations fail immediately if not connected
+// Fix: "buffering timed out after 10000ms" error မဖြစ်အောင်
+// ============================================
+mongoose.set('bufferCommands', false);
+
 // Bot Token
 const token = process.env.BOT_TOKEN;
 if (!token) {
@@ -164,6 +170,47 @@ const MONGODB_URI = process.env.MONGODB_URI;
 let dbConnected = false;
 
 // ============================================
+// MONGOOSE CONNECTION EVENTS - ချိတ်ဆက်မှု ပျက်သွားရင် auto-reconnect
+// ============================================
+mongoose.connection.on('connected', () => {
+  dbConnected = true;
+  console.log('✅ MongoDB ချိတ်ဆက်မှု အောင်မြင်ပါပြီ!');
+});
+
+mongoose.connection.on('disconnected', () => {
+  dbConnected = false;
+  console.warn('⚠️ MongoDB ချိတ်ဆက်မှု ပျက်သွားပါပြီ! Auto-reconnect ကို စောင့်ပါ...');
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('❌ MongoDB connection error:', err.message);
+});
+
+mongoose.connection.on('reconnected', () => {
+  dbConnected = true;
+  console.log('🔄 MongoDB ပြန်လည်ချိတ်ဆက်ပါပြီ!');
+});
+
+// ============================================
+// HELPER: Ensure DB connection before critical operations
+// အရေးကြီး operation တွေ မလုပ်ခင် DB ချိတ်ဆက်မှု သေချာအောင်
+// ============================================
+async function ensureDBConnection() {
+  if (dbConnected && mongoose.connection.readyState === 1) return true;
+  
+  console.log('🔄 MongoDB ပြန်ချိတ်ဆက်နေပါသည်...');
+  try {
+    await connectDB();
+    // 3 စက္ကန့် စောင့်ပြီး ချိတ်ဆက်မှု အတည်ဖြစ်မဖြစ် စစ်ဆေး
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    return dbConnected && mongoose.connection.readyState === 1;
+  } catch (err) {
+    console.error('❌ ensureDBConnection failed:', err.message);
+    return false;
+  }
+}
+
+// ============================================
 // HELPER: Stats functions (singleton document)
 // ============================================
 async function getStats() {
@@ -263,6 +310,12 @@ async function connectDB() {
     return;
   }
 
+  // Already connected ဖြစ်နေရင် ပြန်မချိတ်ဘဲ return
+  if (mongoose.connection.readyState === 1) {
+    dbConnected = true;
+    return;
+  }
+
   console.log('🗄️ MongoDB Atlas ချိတ်ဆက်နေပါသည်...');
 
   // Database name ထည့်မယ် (မပါရင် kumastream လို့သတ်မှတ်မယ်)
@@ -279,10 +332,17 @@ async function connectDB() {
   console.log(`🔗 Connecting to: ${connectURI.replace(/:([^@]+)@/, ':****@')}`);
 
   try {
+    // ယခင် connection ပျက်နေရင် ပိတ်ပြီး ပြန်ဖွင့်မယ်
+    if (mongoose.connection.readyState !== 0) {
+      try { await mongoose.disconnect(); } catch (e) { /* ignore */ }
+    }
+
     await mongoose.connect(connectURI, {
       serverSelectionTimeoutMS: 15000, // 15 စက္ကန့် timeout
       connectTimeoutMS: 15000,
       socketTimeoutMS: 30000,
+      heartbeatFrequencyMS: 10000, // 10 စက္ကန့်ချင်း ချိတ်ဆက်မှု စစ်ဆေး
+      retryWrites: true,
     });
     dbConnected = true;
     console.log('✅ MongoDB သို့ ချိတ်ဆက်ပြီးပါပြီ!');
@@ -599,7 +659,24 @@ bot.use(async (ctx, next) => {
           videoFileId = ctx.message.animation.file_id;
           videoType = 'animation';
         }
-        console.log('🎬 Step 3 video received: type=', videoType);
+        console.log('🎬 Step 3 video received: type=', videoType, 'adminId=', adminId);
+        console.log('📊 DB connected:', dbConnected, 'Mongoose readyState:', mongoose.connection.readyState);
+
+        // DB ချိတ်ဆက်မှု သေချာအောင် စစ်ဆေး - မချိတ်ထားရင် reconnect လုပ်မယ်
+        if (!dbConnected || mongoose.connection.readyState !== 1) {
+          console.log('🔄 DB not connected, trying to reconnect...');
+          await ctx.reply('⏳ MongoDB ပြန်ချိတ်ဆက်နေပါသည်... ခဏစောင့်ပါ');
+          const reconnected = await ensureDBConnection();
+          if (!reconnected) {
+            console.error('❌ DB reconnection failed!');
+            await ctx.reply(
+              '⚠️ <b>MongoDB ချိတ်ဆက်မှု ပျက်သွားပါသည်!</b>\n\n🔄 ခဏပြန်လုပ်ကြည့်ပါ\n💡 /addmovie နဲ့ ပြန်စပါ (Session မပျောက်ပါ)',
+              { parse_mode: 'HTML' }
+            );
+            return;
+          }
+          console.log('✅ DB reconnected successfully!');
+        }
 
         const newMovie = await Movie.create({
           title: state.title || 'Unknown Movie',
@@ -623,8 +700,19 @@ bot.use(async (ctx, next) => {
         );
       } catch (err) {
         console.error('❌ Step 3 video save error:', err.message);
+        console.error('❌ DB state: connected=', dbConnected, 'readyState=', mongoose.connection.readyState);
         try {
-          await ctx.reply(`❌ Video သိမ်းဆည်းမှု အမှား! ${escapeHtml(err.message)}`, { parse_mode: 'HTML' });
+          // Session ကို မဖျက်ဘဲ error ပြမယ် - user က ပြန်လုပ်လို့ရအောင်
+          await ctx.reply(
+            `❌ <b>Video သိမ်းဆည်းမှု အမှား!</b>\n\n📝 Error: ${escapeHtml(err.message)}\n\n💡 <b>ဖြေရှင်းနည်း:</b>\n1. ⏭️ Video မပါ ခလုတ်ကို နှိပ်ပါ (Video မပါဘဲ သိမ်းမယ်)\n2. /addmovie နဲ့ ပြန်စပါ\n\n⚠️ Session မပျောက်ပါ - ထပ်လုပ်နိုင်ပါတယ်`,
+            {
+              parse_mode: 'HTML',
+              ...Markup.inlineKeyboard([
+                [Markup.button.callback('⏭️ Video မပါ', 'skip_video')],
+                [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
+              ])
+            }
+          );
         } catch (err2) {
           console.error('❌ Error reply also failed:', err2.message);
         }
@@ -1072,7 +1160,7 @@ bot.action('admin_addmovie', async (ctx) => {
   ctx.answerCbQuery();
 
   addMovieState[ctx.from.id] = { step: 1, waitingTitle: false, poster_file_id: '', title: '', overview: '' };
-  console.log('🎬 Add movie session created for admin', ctx.from.id);
+  console.log('🎬 Add movie session created for admin', ctx.from.id, '| In-memory sessions:', Object.keys(addMovieState));
   await saveSessionToDB(ctx.from.id);
 
   ctx.editMessageText(
@@ -1108,11 +1196,15 @@ bot.action('skip_overview', async (ctx) => {
   ctx.answerCbQuery();
 
   const adminId = ctx.from.id;
+  console.log('⏭️ Skip Overview clicked by admin', adminId);
   const state = await getAddMovieSession(adminId);
 
   if (!state) {
-    console.log('⚠️ Session not found for admin', adminId);
-    ctx.editMessageText('❌ Session မရှိပါ။ /addmovie ကိုပြန်စပါ');
+    console.log('⚠️ Session not found for admin', adminId, '- in-memory keys:', Object.keys(addMovieState));
+    await ctx.editMessageText(
+      '❌ Session မရှိပါ။ /addmovie ကိုပြန်စပါ',
+      { parse_mode: 'HTML' }
+    );
     return;
   }
 
@@ -1140,35 +1232,69 @@ bot.action('skip_video', async (ctx) => {
   ctx.answerCbQuery();
 
   const adminId = ctx.from.id;
+  console.log('⏭️ Skip Video clicked by admin', adminId);
+  console.log('📊 In-memory session exists:', !!addMovieState[adminId], '| DB connected:', dbConnected);
+  
   const state = await getAddMovieSession(adminId);
 
   if (!state) {
-    console.log('⚠️ Session not found for admin', adminId);
-    ctx.editMessageText('❌ Session မရှိပါ။ /addmovie ကိုပြန်စပါ');
+    console.log('⚠️ Session not found for admin', adminId, '- in-memory keys:', Object.keys(addMovieState));
+    await ctx.editMessageText(
+      '❌ Session မရှိပါ။ /addmovie ကိုပြန်စပါ',
+      { parse_mode: 'HTML' }
+    );
     return;
   }
 
-  const newMovie = await Movie.create({
-    title: state.title || 'Unknown Movie',
-    poster_file_id: state.poster_file_id,
-    overview: state.overview || '',
-    overview_text: state.overview || '',
-    video_file_id: '',
-    addedBy: ctx.from.first_name
-  });
+  try {
+    // DB ချိတ်ဆက်မှု သေချာအောင် စစ်ဆေး
+    if (!dbConnected || mongoose.connection.readyState !== 1) {
+      console.log('🔄 DB not connected for skip_video, trying to reconnect...');
+      await ctx.reply('⏳ MongoDB ပြန်ချိတ်ဆက်နေပါသည်...');
+      const reconnected = await ensureDBConnection();
+      if (!reconnected) {
+        console.error('❌ DB reconnection failed for skip_video!');
+        await ctx.reply(
+          '⚠️ <b>MongoDB ချိတ်ဆက်မှု ပျက်သွားပါသည်!</b>\n\n💾 ဒေတာကို ယာယီသိမ်းဆည်းထားပါတယ်။\n💡 ခဏပြန်လုပ်ကြည့်ပါ ဒါမှမဟုတ် /addmovie နဲ့ ပြန်စပါ',
+          { parse_mode: 'HTML' }
+        );
+        return;
+      }
+    }
 
-  const totalMovies = await Movie.countDocuments();
-  console.log(`✅ New movie added (no video): "${newMovie.title}" | Total: ${totalMovies}`);
+    const newMovie = await Movie.create({
+      title: state.title || 'Unknown Movie',
+      poster_file_id: state.poster_file_id,
+      overview: state.overview || '',
+      overview_text: state.overview || '',
+      video_file_id: '',
+      addedBy: ctx.from.first_name
+    });
 
-  delete addMovieState[adminId];
-  await deleteSessionFromDB(adminId);
+    const totalMovies = await Movie.countDocuments();
+    console.log(`✅ New movie added (no video): "${newMovie.title}" | Total: ${totalMovies}`);
 
-  const safeTitle = escapeHtml(newMovie.title);
-  const safeOverview = newMovie.overview ? '✅' : '⏭️ ချန်လှပ်';
-  await ctx.editMessageText(
-    `✅ <b>ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ! (Video မပါ)</b>\n\n🎬 အမည်: <b>${safeTitle}</b>\n🖼️ Poster ✅\n📝 Overview ${safeOverview}\n🎬 Video ⏭️ ချန်လှပ်\n\n🔍 User တွေက /search ${safeTitle} နဲ့ ရှာလို့ရပါပြီ`,
-    { parse_mode: 'HTML' }
-  );
+    delete addMovieState[adminId];
+    await deleteSessionFromDB(adminId);
+
+    const safeTitle = escapeHtml(newMovie.title);
+    const safeOverview = newMovie.overview ? '✅' : '⏭️ ချန်လှပ်';
+    await ctx.editMessageText(
+      `✅ <b>ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ! (Video မပါ)</b>\n\n🎬 အမည်: <b>${safeTitle}</b>\n🖼️ Poster ✅\n📝 Overview ${safeOverview}\n🎬 Video ⏭️ ချန်လှပ်\n\n🔍 User တွေက /search ${safeTitle} နဲ့ ရှာလို့ရပါပြီ`,
+      { parse_mode: 'HTML' }
+    );
+  } catch (err) {
+    console.error('❌ Skip video save error:', err.message);
+    console.error('❌ DB state: connected=', dbConnected, 'readyState=', mongoose.connection.readyState);
+    try {
+      await ctx.reply(
+        `❌ <b>သိမ်းဆည်းမှု အမှား!</b>\n\n📝 Error: ${escapeHtml(err.message)}\n\n💡 /addmovie နဲ့ ပြန်စပါ`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (err2) {
+      console.error('❌ Error reply also failed:', err2.message);
+    }
+  }
 });
 
 // 📺 Add Series
@@ -1505,7 +1631,7 @@ bot.command('addmovie', async (ctx) => {
   }
 
   addMovieState[ctx.from.id] = { step: 1, waitingTitle: false, poster_file_id: '', title: '', overview: '' };
-  console.log('🎬 Add movie session created for admin', ctx.from.id);
+  console.log('🎬 Add movie session created for admin', ctx.from.id, '| In-memory sessions:', Object.keys(addMovieState));
   await saveSessionToDB(ctx.from.id);
 
   ctx.reply(
@@ -1517,6 +1643,84 @@ bot.command('addmovie', async (ctx) => {
       ])
     }
   );
+});
+
+// /dbstatus command - Admin အတွက် MongoDB ချိတ်ဆက်မှု စစ်ဆေးရန်
+bot.command('dbstatus', async (ctx) => {
+  if (!isAdmin(ctx)) {
+    ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
+    return;
+  }
+
+  const readyStateMap = { 0: 'Disconnected', 1: 'Connected', 2: 'Connecting', 3: 'Disconnecting' };
+  const readyState = mongoose.connection.readyState;
+  const stateText = readyStateMap[readyState] || 'Unknown';
+
+  let statusText = `📊 <b>MongoDB Status</b>\n\n`;
+  statusText += `🔗 Connection: ${dbConnected ? '✅ Connected' : '❌ Disconnected'}\n`;
+  statusText += `📡 ReadyState: ${readyState} (${stateText})\n`;
+  statusText += `📋 Buffer Commands: Disabled\n`;
+  statusText += `💾 Active Sessions: ${Object.keys(addMovieState).length}\n`;
+
+  if (dbConnected && readyState === 1) {
+    try {
+      const movieCount = await Movie.countDocuments();
+      const userCount = await User.countDocuments();
+      statusText += `🎬 Movies: ${movieCount}\n`;
+      statusText += `👤 Users: ${userCount}\n`;
+      statusText += `\n✅ MongoDB ချိတ်ဆက်မှု ပုံမှန်ဖြစ်ပါတယ်`;
+    } catch (err) {
+      statusText += `\n⚠️ DB Query Error: ${escapeHtml(err.message)}`;
+    }
+  } else {
+    statusText += `\n❌ MongoDB ချိတ်ဆက်မှု မရှိပါ\n💡 /dbreconnect နဲ့ ပြန်ချိတ်ဆက်နိုင်ပါတယ်`;
+  }
+
+  ctx.reply(statusText, {
+    parse_mode: 'HTML',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('🔄 Reconnect DB', 'db_reconnect')],
+      [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+    ])
+  });
+});
+
+// /dbreconnect command - MongoDB ပြန်ချိတ်ဆက်ရန်
+bot.command('dbreconnect', async (ctx) => {
+  if (!isAdmin(ctx)) {
+    ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
+    return;
+  }
+
+  ctx.reply('🔄 MongoDB ပြန်ချိတ်ဆက်နေပါသည်...');
+  const success = await ensureDBConnection();
+  if (success) {
+    ctx.reply('✅ MongoDB ပြန်ချိတ်ဆက်ပြီးပါပြီ!');
+  } else {
+    ctx.reply(
+      '❌ MongoDB ချိတ်ဆက်မရပါ!\n\n💡 စစ်ဆေးရန်:\n1. MongoDB Atlas → Network Access → 0.0.0.0/0\n2. MONGODB_URI မှန်ကန်မှု\n3. Railway Environment Variables'
+    );
+  }
+});
+
+// 🔄 DB Reconnect Button
+bot.action('db_reconnect', async (ctx) => {
+  if (!isAdmin(ctx)) { ctx.answerCbQuery('⛔ Admin သာ'); return; }
+  ctx.answerCbQuery('🔄 Reconnecting...');
+
+  const success = await ensureDBConnection();
+  if (success) {
+    ctx.editMessageText('✅ MongoDB ပြန်ချိတ်ဆက်ပြီးပါပြီ!', {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
+      ])
+    });
+  } else {
+    ctx.editMessageText('❌ MongoDB ချိတ်ဆက်မရပါ! /dbreconnect နဲ့ ထပ်စမ်းကြည့်ပါ', {
+      parse_mode: 'HTML'
+    });
+  }
 });
 
 // /addseries command
@@ -1926,6 +2130,16 @@ bot.on(['video', 'document', 'animation'], async (ctx) => {
     else if (ctx.message.animation) videoFileId = ctx.message.animation.file_id;
 
     try {
+      // DB ချိတ်ဆက်မှု စစ်ဆေး
+      if (!dbConnected || mongoose.connection.readyState !== 1) {
+        console.log('🔄 Fallback: DB not connected, trying to reconnect...');
+        const reconnected = await ensureDBConnection();
+        if (!reconnected) {
+          await ctx.reply('⚠️ MongoDB ချိတ်ဆက်မှု ပျက်သွားပါသည်! /addmovie နဲ့ ပြန်စပါ', { parse_mode: 'HTML' });
+          return;
+        }
+      }
+
       const newMovie = await Movie.create({
         title: state.title || 'Unknown Movie',
         poster_file_id: state.poster_file_id,
@@ -1941,7 +2155,7 @@ bot.on(['video', 'document', 'animation'], async (ctx) => {
       await ctx.reply(`✅ <b>ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ!</b>\n\n🎬 အမည်: <b>${safeTitle}</b>\n🖼️ Poster ✅\n📝 Overview ✅\n🎬 Video ✅\n\n🔍 User တွေက /search ${safeTitle} နဲ့ ရှာလို့ရပါပြီ`, { parse_mode: 'HTML' });
     } catch (err) {
       console.error('❌ Fallback video handler error:', err.message);
-      await ctx.reply(`❌ Video သိမ်းဆည်းမှု အမှား! /addmovie နဲ့ ပြန်စပါ။`, { parse_mode: 'HTML' });
+      await ctx.reply(`❌ Video သိမ်းဆည်းမှု အမှား! ${escapeHtml(err.message)}\n\n💡 /addmovie နဲ့ ပြန်စပါ`, { parse_mode: 'HTML' });
     }
   }
 });
@@ -2329,3 +2543,4 @@ startBot();
 // Graceful shutdown
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
