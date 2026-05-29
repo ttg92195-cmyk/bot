@@ -249,6 +249,39 @@ function escapeRegex(str) {
 }
 
 // ============================================
+// NORMALIZE QUERY - Full-width စာလုံးတွေကို ASCII ပြောင်းမယ်
+// ============================================
+function normalizeQuery(str) {
+  if (!str) return '';
+  let result = str;
+  // Full-width parentheses → ASCII parentheses
+  result = result.replace(/\uff08/g, '(');  // （→ (
+  result = result.replace(/\uff09/g, ')');  // ）→ )
+  // Full-width colon → ASCII colon
+  result = result.replace(/\uff1a/g, ':');  // ：→ :
+  // Full-width space → ASCII space
+  result = result.replace(/\u3000/g, ' ');  // 　→ space
+  // Full-width dash/hyphen
+  result = result.replace(/\uff0d/g, '-');  // －→ -
+  // Full-width period
+  result = result.replace(/\uff0e/g, '.');  // ．→ .
+  // Curly/smart quotes → ASCII
+  result = result.replace(/[\u201c\u201d]/g, '"');  // ""→""
+  result = result.replace(/[\u2018\u2019]/g, "'");  // ''→''
+  return result;
+}
+
+// ============================================
+// STRIP YEAR - (2007) ကဲ့သို့ year pattern ကိုဖြတ်မယ်
+// ဥပမာ: "Appleseed Ex Machina (2007)" → "Appleseed Ex Machina"
+// ============================================
+function stripYear(str) {
+  if (!str) return '';
+  // Remove patterns like (2007), (2007-2009), [2007], etc.
+  return str.replace(/\s*[\(\[]\d{4}(?:\s*[-–—]\s*\d{4})?[\)\]]\s*/g, ' ').trim();
+}
+
+// ============================================
 // MONGODB CONNECT + STARTUP
 // ============================================
 async function connectDB() {
@@ -2090,10 +2123,16 @@ bot.command('search', async (ctx) => {
     return;
   }
 
-  console.log(`🔍 Search query: "${query}" from user ${ctx.from.id}`);
+  // 1) Normalize full-width characters (e.g. （ → ()
+  const normalizedQuery = normalizeQuery(query);
+  console.log(`🔍 Search query: "${query}" (normalized: "${normalizedQuery}") from user ${ctx.from.id}`);
 
-  const queryLower = query.toLowerCase();
+  const queryLower = normalizedQuery.toLowerCase();
   const queryEscaped = escapeRegex(queryLower); // Regex special chars တွေကို escape လုပ်မယ်
+
+  // 2) Fallback query without year: "Appleseed Ex Machina (2007)" → "Appleseed Ex Machina"
+  const queryWithoutYear = stripYear(queryLower);
+  const queryWithoutYearEscaped = queryWithoutYear ? escapeRegex(queryWithoutYear) : '';
 
   // Admin Movies ထဲမှာရှာမယ် (MongoDB)
   // dbConnected မှန်ရင် တိုက်ရိုက်ရှာမယ်၊ မရရင် ပြန်ချိတ်ဆက်စမ်းမယ်
@@ -2105,6 +2144,7 @@ bot.command('search', async (ctx) => {
     }
     if (dbConnected) {
       try {
+        // First try: full query (with year if present)
         adminMovieResults = await Movie.find({
           $or: [
             { title: { $regex: queryEscaped, $options: 'i' } },
@@ -2112,6 +2152,18 @@ bot.command('search', async (ctx) => {
             { overview_text: { $regex: queryEscaped, $options: 'i' } }
           ]
         }).limit(3);
+
+        // Fallback: if no results and query has year, try without year
+        if (adminMovieResults.length === 0 && queryWithoutYear && queryWithoutYear !== queryLower) {
+          console.log(`🔍 Search fallback: trying without year "${queryWithoutYear}"`);
+          adminMovieResults = await Movie.find({
+            $or: [
+              { title: { $regex: queryWithoutYearEscaped, $options: 'i' } },
+              { overview: { $regex: queryWithoutYearEscaped, $options: 'i' } },
+              { overview_text: { $regex: queryWithoutYearEscaped, $options: 'i' } }
+            ]
+          }).limit(3);
+        }
       } catch (err) { console.error('search admin movies error:', err.message); }
     }
   }
@@ -2122,6 +2174,9 @@ bot.command('search', async (ctx) => {
     for (const movie of movies) {
       if (movie.title.toLowerCase().includes(queryLower) || cat.includes(queryLower)) {
         movieResults.push({ ...movie, category: cat });
+      } else if (queryWithoutYear && queryWithoutYear !== queryLower && movie.title.toLowerCase().includes(queryWithoutYear)) {
+        // Fallback: match without year too
+        movieResults.push({ ...movie, category: cat });
       }
     }
   }
@@ -2131,6 +2186,9 @@ bot.command('search', async (ctx) => {
   for (const [cat, shows] of Object.entries(seriesDB)) {
     for (const show of shows) {
       if (show.title.toLowerCase().includes(queryLower) || cat.includes(queryLower)) {
+        seriesResults.push({ ...show, category: cat });
+      } else if (queryWithoutYear && queryWithoutYear !== queryLower && show.title.toLowerCase().includes(queryWithoutYear)) {
+        // Fallback: match without year too
         seriesResults.push({ ...show, category: cat });
       }
     }
@@ -2223,10 +2281,16 @@ bot.on('text', async (ctx, next) => {
 
     await incStats('searches');
 
-    console.log(`🔍 Text search: "${query}" from user ${ctx.from.id}`);
+    // 1) Normalize full-width characters (e.g. （ → ()
+    const normalizedQuery = normalizeQuery(query);
+    console.log(`🔍 Text search: "${query}" (normalized: "${normalizedQuery}") from user ${ctx.from.id}`);
 
-    const queryLower = query.toLowerCase();
+    const queryLower = normalizedQuery.toLowerCase();
     const queryEscaped = escapeRegex(queryLower); // Regex special chars တွေကို escape လုပ်မယ်
+
+    // 2) Fallback query without year
+    const queryWithoutYear = stripYear(queryLower);
+    const queryWithoutYearEscaped = queryWithoutYear ? escapeRegex(queryWithoutYear) : '';
 
     // Admin Movies ထဲမှာရှာမယ် (MongoDB)
     // dbConnected မှန်ရင် တိုက်ရိုက်ရှာမယ်၊ မရရင် ပြန်ချိတ်ဆက်စမ်းမယ်
@@ -2238,6 +2302,7 @@ bot.on('text', async (ctx, next) => {
       }
       if (dbConnected) {
         try {
+          // First try: full query (with year if present)
           adminMovieResults = await Movie.find({
             $or: [
               { title: { $regex: queryEscaped, $options: 'i' } },
@@ -2245,6 +2310,18 @@ bot.on('text', async (ctx, next) => {
               { overview_text: { $regex: queryEscaped, $options: 'i' } }
             ]
           }).limit(3);
+
+          // Fallback: if no results and query has year, try without year
+          if (adminMovieResults.length === 0 && queryWithoutYear && queryWithoutYear !== queryLower) {
+            console.log(`🔍 Text search fallback: trying without year "${queryWithoutYear}"`);
+            adminMovieResults = await Movie.find({
+              $or: [
+                { title: { $regex: queryWithoutYearEscaped, $options: 'i' } },
+                { overview: { $regex: queryWithoutYearEscaped, $options: 'i' } },
+                { overview_text: { $regex: queryWithoutYearEscaped, $options: 'i' } }
+              ]
+            }).limit(3);
+          }
         } catch (err) { console.error('text search admin movies error:', err.message); }
       }
     }
@@ -2255,6 +2332,9 @@ bot.on('text', async (ctx, next) => {
       for (const movie of movies) {
         if (movie.title.toLowerCase().includes(queryLower) || cat.includes(queryLower)) {
           movieResults.push({ ...movie, category: cat });
+        } else if (queryWithoutYear && queryWithoutYear !== queryLower && movie.title.toLowerCase().includes(queryWithoutYear)) {
+          // Fallback: match without year too
+          movieResults.push({ ...movie, category: cat });
         }
       }
     }
@@ -2264,6 +2344,9 @@ bot.on('text', async (ctx, next) => {
     for (const [cat, shows] of Object.entries(seriesDB)) {
       for (const show of shows) {
         if (show.title.toLowerCase().includes(queryLower) || cat.includes(queryLower)) {
+          seriesResults.push({ ...show, category: cat });
+        } else if (queryWithoutYear && queryWithoutYear !== queryLower && show.title.toLowerCase().includes(queryWithoutYear)) {
+          // Fallback: match without year too
           seriesResults.push({ ...show, category: cat });
         }
       }
