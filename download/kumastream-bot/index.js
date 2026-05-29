@@ -681,7 +681,7 @@ bot.use(async (ctx, next) => {
       console.log(`📥 Step 2: Overview received from admin ${adminId}, title="${state.title}"`);
 
       await ctx.reply(
-        '✅ Overview လက်ခံရရှိပါပြီး!\n\n🎬 *အဆင့် ၃/၃: Video File ပို့ပါ*\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။\nVideo ပို့ပြီးရင် ဇတ်ကားအသစ် သိမ်းဆည်းသွားပါမယ်။\n\n💡 *အကြံပြုချက်:*\n• Video ကို Video အနေနဲ့ပို့ပါ (File အနေနဲ့မဟုတ်ဘဲ)\n• ကြီးမားတဲ့ Video တွေအတွက် အချိန်အနည်းငယ်စောင့်ပါ\n• တင်ပြီးရင် Bot က အတည်ပြုမယ်',
+        '✅ Overview လက်ခံရရှိပါပြီး!\n\n🎬 *အဆင့် ၃/၃: Video File ပို့ပါ*\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။\nVideo ပို့ပြီးရင် ဇတ်ကားအသစ် သိမ်းဆည်းသွားပါမယ်။\n\n💡 *Video ပို့နည်းများ:*\n• Video ကို တိုက်ရိုက်ပို့ပါ (Video အနေနဲ့)\n• File အနေနဲ့ပို့ချင်ရင် "Send as File" နဲ့ပို့ပါ\n• တခြား Channel ကနေ *Forward* လုပ်ပြီးလည်းပို့လို့ရပါတယ်\n• ကြီးမားတဲ့ Video တွေအတွက် အချိန်အနည်းငယ်စောင့်ပါ',
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
@@ -714,6 +714,7 @@ bot.use(async (ctx, next) => {
       console.log(`   - has voice: ${!!msgVoice}`);
       console.log(`   - has photo: ${!!msgPhoto}`);
       console.log(`   - has text: ${!!(ctx.message && ctx.message.text)}`);
+      console.log(`   - is forwarded: ${!!ctx.message.forward_from_chat || !!ctx.message.forward_from}`);
       console.log(`   - message keys: ${Object.keys(ctx.message).join(', ')}`);
     }
 
@@ -2705,6 +2706,7 @@ bot.on('message', async (ctx, next) => {
     const msgVoice = ctx.message.voice;
 
     console.log(`🎬 FALLBACK Video Handler: admin=${adminId}, step=3, video=${!!msgVideo}, doc=${!!msgDoc}, anim=${!!msgAnim}, vn=${!!msgVideoNote}, audio=${!!msgAudio}, voice=${!!msgVoice}`);
+    console.log(`🎬 FALLBACK: is_forwarded=${!!ctx.message.forward_from_chat || !!ctx.message.forward_from}, keys=${Object.keys(ctx.message).join(',')}`);
 
     if (msgVideo || msgDoc || msgAnim || msgVideoNote || msgAudio || msgVoice) {
       let videoFileId = '';
