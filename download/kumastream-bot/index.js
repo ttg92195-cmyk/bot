@@ -38,9 +38,9 @@ const addMovieState = {}; // { adminId: { step: 1|2|3, waitingTitle: false, post
 const searchState = {};  // { userId: true }
 
 // ============================================
-// STATE TIMEOUT: 5 မိနစ်ပြည့်ရင် state ကို auto-cancel မယ်
+// STATE TIMEOUT: 15 မိနစ်ပြည့်ရင် state ကို auto-cancel မယ်
 // ============================================
-const ADD_MOVIE_TIMEOUT = 5 * 60 * 1000; // 5 မိနစ်
+const ADD_MOVIE_TIMEOUT = 15 * 60 * 1000; // 15 မိနစ် (ကြီးမားတဲ့ Video upload အတွက်)
 function checkStateTimeout(adminId) {
   const state = addMovieState[adminId];
   if (state && state.createdAt && (Date.now() - state.createdAt > ADD_MOVIE_TIMEOUT)) {
@@ -580,9 +580,13 @@ async function displayAdminMovie(ctx, movie) {
 // MIDDLEWARE: Register user + Handle 3-step Add Movie
 // ============================================
 bot.use(async (ctx, next) => {
-  if (ctx.from) {
-    await registerUser(ctx);
-    await incStats('totalMessages');
+  try {
+    if (ctx.from) {
+      await registerUser(ctx);
+      await incStats('totalMessages');
+    }
+  } catch (err) {
+    console.error('❌ Middleware registerUser/incStats error:', err.message);
   }
 
   // ============================================
@@ -593,14 +597,15 @@ bot.use(async (ctx, next) => {
   // Step 2: Overview/Description (Text)
   // Step 3: Video File
   // ============================================
+  try {
   const adminId = ctx.from ? ctx.from.id : 0;
   const state = addMovieState[adminId];
 
   if (state && isAdmin(ctx)) {
-    // State timeout စစ်ဆေးမယ် - 5 မိနစ်ကျော်ရင် auto cancel
+    // State timeout စစ်ဆေးမယ် - 15 မိနစ်ကျော်ရင် auto cancel
     if (checkStateTimeout(adminId)) {
       await ctx.reply(
-        '⏰ *Add Movie Session သက်တမ်းကုန်ဆုံးပါပြီး*\n\n5 မိနစ်ကျော်သွားလို့ Session ကို အလိုအလျောက်ပိတ်ပါပြီ။\n\n💡 ပြန်စချင်ရင် /addmovie ဒါမှမဟုတ် /admin ကနေ ပြန်စပါ။',
+        '⏰ *Add Movie Session သက်တမ်းကုန်ဆုံးပါပြီး*\n\n15 မိနစ်ကျော်သွားလို့ Session ကို အလိုအလျောက်ပိတ်ပါပြီ။\n\n💡 ပြန်စချင်ရင် /addmovie ဒါမှမဟုတ် /admin ကနေ ပြန်စပါ။',
         { parse_mode: 'Markdown' }
       );
       return next();
@@ -806,6 +811,12 @@ bot.use(async (ctx, next) => {
       );
       return;
     }
+  }
+
+  } catch (err) {
+    console.error('❌ Add Movie middleware error:', err.message);
+    console.error('❌ Full error:', err);
+    // Error ဖြစ်ရင်လည်း next() ကိုခေါ်မယ် - bot ကို ဆက်လည်စေမယ်
   }
 
   return next();
@@ -1645,54 +1656,6 @@ bot.command('notify', async (ctx) => {
   ctx.reply(`🔔 Notification ပို့ပြီးပါပြီ!\n\n✅ ပို့ရမှု: ${sentCount}\n❌ မပို့နိုင်: ${failCount}`);
 });
 
-// /listmovies command
-bot.command('listmovies', async (ctx) => {
-  if (!isAdmin(ctx)) {
-    logUnauthorizedAccess(ctx, '/listmovies');
-    ctx.reply('⛔ Admin သာ အသုံးပြုနိုင်ပါသည်');
-    return;
-  }
-
-  let movies = [];
-  if (dbConnected) {
-    try { movies = await Movie.find().sort({ addedAt: -1 }); } catch (err) { console.error('listmovies error:', err.message); }
-  }
-
-  if (movies.length === 0) {
-    ctx.reply(
-      '📂 *တင်ထားသော ဇတ်ကားများ မရှိသေးပါ*\n\n/addmovie ဒါမှမဟုတ် Admin Panel မှာ Add Movie နှိပ်ပြီး ဇတ်ကားအသစ်တင်ပါ',
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('🎬 Add Movie', 'admin_addmovie')],
-          [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
-        ])
-      }
-    );
-    return;
-  }
-
-  let listText = `📂 *တင်ထားသော ဇတ်ကားများ (${movies.length} ကား)*\n\n`;
-
-  movies.forEach((movie, i) => {
-    const hasPoster = movie.poster_file_id ? '🖼️' : '❌';
-    const hasVideo = movie.video_file_id ? '🎬' : '⏭️';
-    const addedDate = movie.addedAt ? new Date(movie.addedAt).toLocaleDateString() : '';
-    listText += `${i + 1}. *${movie.title}*\n   ${hasPoster} Poster | 📝 Overview | ${hasVideo} Video | 📅 ${addedDate}\n`;
-  });
-
-  listText += '\n💡 ဖျက်ချင်ရင်: /deletemovie အမှတ်စဉ်';
-  listText += '\n📊 Storage: Limit မရှိပါ';
-
-  ctx.reply(listText, {
-    parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([
-      [Markup.button.callback('🎬 Add Movie', 'admin_addmovie')],
-      [Markup.button.callback('🔙 Admin Panel', 'admin_back')]
-    ])
-  });
-});
-
 // /deletemovie command
 bot.command('deletemovie', async (ctx) => {
   if (!isAdmin(ctx)) {
@@ -2261,10 +2224,10 @@ bot.command('search', async (ctx) => {
 // 🔍 ခလုတ်နှိပ်ပြီး စာသားရိုက်ရင် Search အဖြစ်လက်ခံမယ်
 // ============================================
 bot.on('text', async (ctx, next) => {
-  // Admin က Add Movie Step 1b (Title) နဲ့ Step 2 (Overview) မှာဆိုရင် Search မဝင်ပါနဲ့
+  // Admin က Add Movie flow မှာဆိုရင် Search မဝင်ပါနဲ့
   const adminId = ctx.from ? ctx.from.id : 0;
   const addState = addMovieState[adminId];
-  if (addState && isAdmin(ctx) && (addState.waitingTitle || addState.step === 2)) {
+  if (addState && isAdmin(ctx) && (addState.waitingTitle || addState.step === 2 || addState.step === 3)) {
     return next(); // Add Movie flow ကိုဆက်သွားစေ
   }
 
@@ -2722,6 +2685,96 @@ bot.hears(/hi/i, (ctx) => {
     'Hello bro! 👋\n\nဘာကူညီပေးရမလဲ?',
     mainMenu
   );
+});
+
+// ============================================
+// FALLBACK: Add Movie Step 3 Video Handler
+// bot.use() middleware မှာ video ကို catch မလုပ်နိုင်ရင် ဒီ handler က catch လုပ်ပေးမယ်
+// ============================================
+bot.on('message', async (ctx, next) => {
+  const adminId = ctx.from ? ctx.from.id : 0;
+  const state = addMovieState[adminId];
+
+  // Admin က Add Movie Step 3 မှာဆိုရင် video ကို catch လုပ်မယ်
+  if (state && isAdmin(ctx) && state.step === 3 && ctx.message) {
+    const msgVideo = ctx.message.video;
+    const msgDoc = ctx.message.document;
+    const msgAnim = ctx.message.animation;
+    const msgVideoNote = ctx.message.video_note;
+    const msgAudio = ctx.message.audio;
+    const msgVoice = ctx.message.voice;
+
+    console.log(`🎬 FALLBACK Video Handler: admin=${adminId}, step=3, video=${!!msgVideo}, doc=${!!msgDoc}, anim=${!!msgAnim}, vn=${!!msgVideoNote}, audio=${!!msgAudio}, voice=${!!msgVoice}`);
+
+    if (msgVideo || msgDoc || msgAnim || msgVideoNote || msgAudio || msgVoice) {
+      let videoFileId = '';
+      let videoType = '';
+      if (msgVideo) { videoFileId = msgVideo.file_id; videoType = 'video'; }
+      else if (msgAnim) { videoFileId = msgAnim.file_id; videoType = 'animation'; }
+      else if (msgDoc) { videoFileId = msgDoc.file_id; videoType = 'document'; }
+      else if (msgVideoNote) { videoFileId = msgVideoNote.file_id; videoType = 'video'; }
+      else if (msgAudio) { videoFileId = msgAudio.file_id; videoType = 'document'; }
+      else if (msgVoice) { videoFileId = msgVoice.file_id; videoType = 'document'; }
+
+      console.log(`🎬 FALLBACK: Video received - type: ${videoType}, title="${state.title}"`);
+
+      try {
+        // DB ချိတ်ဆက်စစ်ဆေးမယ်
+        if (!dbConnected) {
+          await ctx.reply('⏳ Database ပြန်ချိတ်ဆက်နေပါသည်...', { parse_mode: 'Markdown' });
+          const reconnected = await ensureDBConnected();
+          if (!reconnected) {
+            await ctx.reply('❌ Database ချိတ်ဆက်မရပါ! နောက်မှပြန်စမ်းပါ။', { parse_mode: 'Markdown' });
+            return;
+          }
+        }
+
+        const newMovie = await Movie.create({
+          title: state.title || 'Unknown Movie',
+          poster_file_id: state.poster_file_id,
+          overview: state.overview || '',
+          overview_text: state.overview || '',
+          video_file_id: videoFileId,
+          video_type: videoType,
+          addedBy: ctx.from.first_name
+        });
+
+        const totalMovies = await Movie.countDocuments();
+        console.log(`✅ FALLBACK: Movie saved "${newMovie.title}" | Type: ${videoType} | Total: ${totalMovies}`);
+
+        delete addMovieState[adminId];
+
+        await ctx.reply(
+          `✅ *ဇတ်ကားအသစ် သိမ်းဆည်းပြီးပါပြီ!*\n\n🎬 အမည်: ${newMovie.title}\n🖼️ Poster ✅\n📝 Overview ✅\n🎬 Video ✅ (${videoType})\n\n🔍 User တွေက /search ${newMovie.title} နဲ့ ရှာလို့ရပါပြီ`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (err) {
+        console.error(`❌ FALLBACK: Movie save error:`, err.message);
+        await ctx.reply(
+          `❌ *ဇတ်ကားသိမ်းဆည်းမှု မအောင်မြင်ပါ!*\n\nပြဿနာ: ${err.message}\n\n💡 /admin ကနေ ပြန်စပါ။`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+      return; // Stop processing
+    }
+
+    // Video မဟုတ်တဲ့ message ဆိုရင် သတိပေးမယ်
+    if (!ctx.message.text || !ctx.message.text.startsWith('/')) {
+      await ctx.reply(
+        '⚠️ *Video File ပို့ပါ*\n\nVideo ဖိုင်ကို ဒီ Chat ထဲမှာ ပို့ပါ။\n\n💡 အကြံပြုချက်:\n• Video ကို Video အနေနဲ့ပို့ပါ\n• File အနေနဲ့ပို့ချင်ရင် "Send as File" နဲ့ပို့ပါ',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('⏭️ Video မပါ', 'skip_video')],
+            [Markup.button.callback('❌ ပယ်ဖျက်', 'cancel_addmovie')]
+          ])
+        }
+      );
+      return;
+    }
+  }
+
+  return next();
 });
 
 // ============================================
